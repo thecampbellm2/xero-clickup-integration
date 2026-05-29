@@ -532,6 +532,14 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
         if hourly_rate:
             clickup.set_field(task_id, 'Hourly Rate', hourly_rate)
 
+        # Auto-trigger deposit invoice if all required fields are present
+        if client_name and hourly_rate and time_estimate_ms:
+            logger.info(f'All fields present — auto-triggering deposit invoice for task {task_id}')
+            clickup.update_status(task_id, 'send deposit invoice')
+        else:
+            missing = [f for f, v in [('Client', client_name), ('Hourly Rate', hourly_rate), ('Time Estimate', time_estimate_ms)] if not v]
+            logger.warning(f'Task {task_id} missing fields {missing} — left at Not Started for manual review')
+
         # Upload attachments
         if attachments and message_id:
             for att in attachments:
