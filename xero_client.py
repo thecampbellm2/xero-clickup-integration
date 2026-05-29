@@ -181,6 +181,13 @@ class XeroClient:
         resp.raise_for_status()
         return resp.json()['Invoices'][0]
 
+
+    def get_contact(self, contact_id: str) -> dict:
+        resp = requests.get(f'{API_BASE}/Contacts/{contact_id}', headers=self._headers())
+        resp.raise_for_status()
+        contacts = resp.json().get('Contacts', [])
+        return contacts[0] if contacts else {}
+
     def get_invoice(self, invoice_id: str) -> dict:
         resp = requests.get(f'{API_BASE}/Invoices/{invoice_id}', headers=self._headers())
         resp.raise_for_status()

@@ -168,8 +168,14 @@ def xero_webhook():
 
     events = (request.json or {}).get('events', [])
     for event in events:
-        if event.get('eventType') == 'UPDATE' and event.get('eventCategory') == 'INVOICE':
-            handle_payment(event.get('resourceId'))
+        category  = event.get('eventCategory')
+        eventtype = event.get('eventType')
+        resource  = event.get('resourceId')
+
+        if eventtype == 'UPDATE' and category == 'INVOICE':
+            handle_payment(resource)
+        elif eventtype == 'CREATE' and category == 'CONTACT':
+            handle_new_contact(resource)
 
     return '', 200
 
@@ -345,6 +351,31 @@ def handle_payment(invoice_id: str):
     except Exception as e:
         logger.error(f'handle_payment failed for invoice {invoice_id}: {e}')
 
+
+
+
+def handle_new_contact(contact_id: str):
+    """
+    Triggered when a new contact is created in Xero.
+    Adds the contact name to the Client dropdown in ClickUp.
+    """
+    try:
+        contact = xero.get_contact(contact_id)
+        if not contact:
+            logger.warning(f'Contact {contact_id} not found in Xero')
+            return
+
+        name = contact.get('Name', '').strip()
+        if not name:
+            logger.warning(f'Contact {contact_id} has no name — skipping')
+            return
+
+        added = clickup.add_client_option(name)
+        if added:
+            logger.info(f'New Xero contact "{name}" added to ClickUp Client dropdown')
+
+    except Exception as e:
+        logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
 
 # ------------------------------------------------------------------ #
 #  Entry point                                                         #
