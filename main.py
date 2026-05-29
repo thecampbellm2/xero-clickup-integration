@@ -467,10 +467,13 @@ def process_job_emails():
 
                 # Create the ClickUp task
                 task = create_job_task(
-                    name            = job_title,
-                    client_name     = client_name,
-                    hourly_rate     = hourly_rate,
+                    name             = job_title,
+                    client_name      = client_name,
+                    hourly_rate      = hourly_rate,
                     time_estimate_ms = est_ms,
+                    description      = email['body'],
+                    attachments      = email.get('attachments', []),
+                    message_id       = email['id'],
                 )
 
                 if task:
@@ -487,8 +490,9 @@ def process_job_emails():
         logger.error(f'process_job_emails error: {e}')
 
 
-def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms) -> dict:
-    """Create a ClickUp task in the Jobs list with pre-filled fields."""
+def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
+                    description: str = '', attachments: list = None, message_id: str = '') -> dict:
+    """Create a ClickUp task in the Jobs list with pre-filled fields, description and attachments."""
     try:
         task_data = {
             'name':   name,
@@ -496,6 +500,8 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms) 
         }
         if time_estimate_ms:
             task_data['time_estimate'] = time_estimate_ms
+        if description:
+            task_data['description'] = description.strip()
 
         resp = requests.post(
             f'https://api.clickup.com/api/v2/list/{config.CLICKUP_LIST_ID}/task',
@@ -506,7 +512,7 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms) 
             json=task_data,
         )
         resp.raise_for_status()
-        task = resp.json()
+        task    = resp.json()
         task_id = task['id']
 
         # Set custom fields
@@ -514,6 +520,23 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms) 
             clickup.set_field(task_id, 'Client', client_name)
         if hourly_rate:
             clickup.set_field(task_id, 'Hourly Rate', hourly_rate)
+
+        # Upload attachments
+        if attachments and message_id:
+            for att in attachments:
+                try:
+                    file_bytes = gmail.download_attachment(message_id, att['attachment_id'])
+                    upload_resp = requests.post(
+                        f'https://api.clickup.com/api/v2/task/{task_id}/attachment',
+                        headers={'Authorization': config.CLICKUP_API_TOKEN},
+                        files={'attachment': (att['filename'], file_bytes, att['mime_type'])},
+                    )
+                    if upload_resp.ok:
+                        logger.info(f'Uploaded attachment "{att["filename"]}" to task {task_id}')
+                    else:
+                        logger.error(f'Failed to upload "{att["filename"]}": {upload_resp.status_code} {upload_resp.text}')
+                except Exception as e:
+                    logger.error(f'Attachment upload error for "{att["filename"]}": {e}')
 
         return task
 

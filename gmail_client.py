@@ -161,17 +161,47 @@ class GmailClient:
         resp.raise_for_status()
         msg = resp.json()
 
-        headers = {h['name']: h['value'] for h in msg.get('payload', {}).get('headers', [])}
-        subject = headers.get('Subject', '')
-        sender  = headers.get('From', '')
-        body    = self._extract_body(msg.get('payload', {}))
+        headers     = {h['name']: h['value'] for h in msg.get('payload', {}).get('headers', [])}
+        subject     = headers.get('Subject', '')
+        sender      = headers.get('From', '')
+        body        = self._extract_body(msg.get('payload', {}))
+        attachments = self._extract_attachments(msg.get('payload', {}))
 
         return {
-            'id':      message_id,
-            'subject': subject,
-            'sender':  sender,
-            'body':    body,
+            'id':          message_id,
+            'subject':     subject,
+            'sender':      sender,
+            'body':        body,
+            'attachments': attachments,   # list of {attachment_id, filename, mime_type}
         }
+
+    def _extract_attachments(self, payload: dict) -> list:
+        """Return a list of attachment metadata from the message payload."""
+        attachments = []
+        for part in payload.get('parts', []):
+            filename      = part.get('filename', '')
+            attachment_id = part.get('body', {}).get('attachmentId')
+            mime_type     = part.get('mimeType', 'application/octet-stream')
+            if filename and attachment_id:
+                attachments.append({
+                    'attachment_id': attachment_id,
+                    'filename':      filename,
+                    'mime_type':     mime_type,
+                })
+            # Recurse into nested multipart
+            if part.get('parts'):
+                attachments.extend(self._extract_attachments(part))
+        return attachments
+
+    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        """Download and return the raw bytes of a Gmail attachment."""
+        resp = requests.get(
+            f'{API_BASE}/messages/{message_id}/attachments/{attachment_id}',
+            headers=self._headers()
+        )
+        resp.raise_for_status()
+        data = resp.json().get('data', '')
+        return base64.urlsafe_b64decode(data)
 
     def _extract_body(self, payload: dict) -> str:
         """Extract plain text body from a Gmail message payload."""
