@@ -178,6 +178,8 @@ class XeroClient:
             headers=self._headers(),
             json={'Invoices': [invoice]}
         )
+        if not resp.ok:
+            logger.error(f'Xero invoice error {resp.status_code}: {resp.text}')
         resp.raise_for_status()
         return resp.json()['Invoices'][0]
 
