@@ -160,14 +160,12 @@ class XeroClient:
             'Type':    'ACCREC',
             'Status':  'DRAFT',
             'Contact': {'ContactID': contact_id},
-            'Reference': reference,          # stores ClickUp task ID + type for payment tracking
-            'LineAmountTypes': line_amount_type,
+            'Reference': reference,
             'LineItems': [{
                 'Description': description,
                 'Quantity':    1.0,
                 'UnitAmount':  round(amount, 2),
                 'AccountCode': account_code,
-                'TaxType':     tax_type,
             }],
         }
         if branding_theme_id:
