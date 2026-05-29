@@ -501,7 +501,7 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
         if time_estimate_ms:
             task_data['time_estimate'] = time_estimate_ms
         if description:
-            task_data['description'] = description.strip()
+            task_data['markdown_description'] = description.strip()
 
         resp = requests.post(
             f'https://api.clickup.com/api/v2/list/{config.CLICKUP_LIST_ID}/task',
@@ -514,6 +514,17 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
         resp.raise_for_status()
         task    = resp.json()
         task_id = task['id']
+
+        # Ensure description is set (belt and braces — update after create)
+        if description:
+            requests.put(
+                f'https://api.clickup.com/api/v2/task/{task_id}',
+                headers={
+                    'Authorization': config.CLICKUP_API_TOKEN,
+                    'Content-Type':  'application/json',
+                },
+                json={'markdown_description': description.strip()},
+            )
 
         # Set custom fields
         if client_name:

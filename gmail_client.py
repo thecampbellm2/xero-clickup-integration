@@ -214,10 +214,22 @@ class GmailClient:
             if part.get('mimeType') == 'text/plain' and part.get('body', {}).get('data'):
                 return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
 
-        # Fallback: any part with data
+        # Recurse into nested multipart parts
         for part in payload.get('parts', []):
-            if part.get('body', {}).get('data'):
-                return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
+            if part.get('mimeType', '').startswith('multipart/'):
+                result = self._extract_body(part)
+                if result:
+                    return result
+
+        # Fallback: strip HTML tags from text/html part
+        import re
+        for part in payload.get('parts', []):
+            if part.get('mimeType') == 'text/html' and part.get('body', {}).get('data'):
+                html = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
+                text = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r'[ \t]+', ' ', text)
+                text = re.sub(r'\n{3,}', '\n\n', text)
+                return text.strip()
 
         return ''
 
