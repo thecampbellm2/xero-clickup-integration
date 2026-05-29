@@ -64,6 +64,11 @@ def xero_auth():
     """Open this URL in a browser to connect George's Xero organisation."""
     return redirect(xero.get_auth_url())
 
+@app.route('/xero/debug')
+def xero_debug():
+    """Temporarily shows the auth URL for inspection — remove after debugging."""
+    return jsonify({'auth_url': xero.get_auth_url()}), 200
+
 
 @app.route('/xero/callback')
 def xero_callback():
