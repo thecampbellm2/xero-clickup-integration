@@ -18,12 +18,11 @@ API_BASE        = 'https://api.xero.com/api.xro/2.0'
 TOKEN_FILE      = 'xero_tokens.json'
 
 SCOPES = ' '.join([
-    'accounting.transactions.read',
-    'accounting.transactions.create',
-    'accounting.contacts.read',
-    'accounting.contacts.create',
-    'accounting.settings.read',
-    'offline_access',
+    'accounting.invoices',          # create/read invoices (replaces accounting.transactions)
+    'accounting.contacts.read',     # read contacts
+    'accounting.contacts.create',   # create contacts
+    'accounting.settings.read',     # branding themes
+    'offline_access',               # refresh tokens
 ])
 
 
