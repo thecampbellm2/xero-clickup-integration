@@ -126,3 +126,41 @@ class ClickUpClient:
         field_name = 'Deposit Invoice Status' if invoice_type == 'deposit' else 'Final Invoice Status'
         self.set_field(task_id, field_name, 'Paid')
         logger.info(f'Task {task_id} → {field_name} marked Paid')
+
+    # ------------------------------------------------------------------ #
+    #  Contact sync (called from Xero webhook)                            #
+    # ------------------------------------------------------------------ #
+
+    def add_client_option(self, contact_name: str) -> bool:
+        """
+        Add a new option to the Client dropdown field.
+        Returns True if added successfully, False if already exists or failed.
+        """
+        field = self._fields.get('client')
+        if not field:
+            self._load_fields()
+            field = self._fields.get('client')
+        if not field:
+            logger.error('Client dropdown field not found in ClickUp')
+            return False
+
+        # Check if option already exists
+        existing = [o['name'].lower() for o in field.get('type_config', {}).get('options', [])]
+        if contact_name.lower() in existing:
+            logger.info(f'Client "{contact_name}" already exists in dropdown — skipping')
+            return False
+
+        # Add the new option via ClickUp API
+        field_id = field['id']
+        resp = requests.post(
+            f'{BASE}/list/{self.list_id}/field/{field_id}/option',
+            headers=self.headers,
+            json={'name': contact_name}
+        )
+        if resp.ok:
+            logger.info(f'Added "{contact_name}" to Client dropdown')
+            self._load_fields()  # Refresh cache so new option is usable immediately
+            return True
+        else:
+            logger.error(f'Failed to add "{contact_name}" to Client dropdown: {resp.status_code} {resp.text}')
+            return False
