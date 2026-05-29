@@ -16,10 +16,14 @@ import logging
 import os
 
 from flask import Flask, jsonify, redirect, request
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import config
 from clickup_client import ClickUpClient, STATUS_DEPOSIT_INVOICED, STATUS_FINAL_INVOICED
 from xero_client import XeroClient
+from gmail_client import GmailClient
+from email_parser import parse_job_email
 
 # ------------------------------------------------------------------ #
 #  Logging                                                             #
@@ -41,6 +45,12 @@ xero    = XeroClient(
     config.XERO_CLIENT_SECRET,
     config.XERO_REDIRECT_URI,
     config.XERO_WEBHOOK_KEY,
+)
+
+gmail   = GmailClient(
+    config.GMAIL_CLIENT_ID,
+    config.GMAIL_CLIENT_SECRET,
+    config.GMAIL_REDIRECT_URI,
 )
 
 # Status names that trigger automation (lowercase, must match ClickUp exactly)
@@ -103,6 +113,36 @@ def xero_info():
         logger.error(f'Error fetching Xero info: {e}')
         return jsonify({'error': str(e)}), 500
 
+
+
+
+# ------------------------------------------------------------------ #
+#  Gmail OAuth                                                         #
+# ------------------------------------------------------------------ #
+@app.route('/gmail/auth')
+def gmail_auth():
+    """Open in browser to connect the nepmclickup@gmail.com account."""
+    return redirect(gmail.get_auth_url())
+
+
+@app.route('/gmail/callback')
+def gmail_callback():
+    code = request.args.get('code')
+    if not code:
+        return jsonify({'error': 'No authorisation code received from Google.'}), 400
+    try:
+        gmail.exchange_code(code)
+        return jsonify({'message': 'Gmail connected successfully! You can close this tab.'}), 200
+    except Exception as e:
+        logger.error(f'Gmail auth error: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/gmail/process')
+def gmail_process_manual():
+    """Manually trigger email processing (useful for testing)."""
+    process_job_emails()
+    return jsonify({'status': 'done'}), 200
 
 # ------------------------------------------------------------------ #
 #  ClickUp webhook                                                     #
@@ -377,9 +417,119 @@ def handle_new_contact(contact_id: str):
     except Exception as e:
         logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
 
+
+
+def process_job_emails():
+    """
+    Poll Gmail for unprocessed emails from George and create ClickUp tasks.
+    Runs automatically every 3 minutes via the scheduler.
+    """
+    if not gmail.is_authenticated():
+        logger.warning('Gmail not authenticated — skipping email poll')
+        return
+
+    try:
+        emails = gmail.get_unprocessed_emails()
+        if not emails:
+            return
+
+        logger.info(f'Processing {len(emails)} new job email(s)')
+
+        # Get current Client dropdown options for fuzzy matching
+        client_field  = clickup._fields.get('client', {})
+        client_options = [o['name'] for o in client_field.get('type_config', {}).get('options', [])]
+
+        for email in emails:
+            try:
+                # Parse with Claude
+                data = parse_job_email(
+                    subject        = email['subject'],
+                    body           = email['body'],
+                    client_options = client_options,
+                    api_key        = config.ANTHROPIC_API_KEY,
+                )
+
+                if not data:
+                    logger.error(f'Could not parse email {email["id"]} — skipping')
+                    gmail.mark_processed(email['id'])
+                    continue
+
+                job_title       = data.get('job_title', '').strip() or email['subject']
+                client_name     = data.get('client', '').strip()
+                estimated_hours = data.get('estimated_hours')
+                hourly_rate     = data.get('hourly_rate')
+
+                if not client_name:
+                    logger.warning(f'No client match for email "{email["subject"]}" — task will have blank Client field')
+
+                # Convert hours to milliseconds for ClickUp time estimate
+                est_ms = int(estimated_hours * 3_600_000) if estimated_hours else None
+
+                # Create the ClickUp task
+                task = create_job_task(
+                    name            = job_title,
+                    client_name     = client_name,
+                    hourly_rate     = hourly_rate,
+                    time_estimate_ms = est_ms,
+                )
+
+                if task:
+                    logger.info(f'Created task "{job_title}" (client: {client_name or "blank"})')
+
+                # Mark email as processed regardless of task creation outcome
+                gmail.mark_processed(email['id'])
+
+            except Exception as e:
+                logger.error(f'Failed to process email {email["id"]}: {e}')
+                gmail.mark_processed(email['id'])   # mark processed to avoid infinite retry
+
+    except Exception as e:
+        logger.error(f'process_job_emails error: {e}')
+
+
+def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms) -> dict:
+    """Create a ClickUp task in the Jobs list with pre-filled fields."""
+    try:
+        task_data = {
+            'name':   name,
+            'status': 'not started',
+        }
+        if time_estimate_ms:
+            task_data['time_estimate'] = time_estimate_ms
+
+        resp = requests.post(
+            f'https://api.clickup.com/api/v2/list/{config.CLICKUP_LIST_ID}/task',
+            headers={
+                'Authorization': config.CLICKUP_API_TOKEN,
+                'Content-Type':  'application/json',
+            },
+            json=task_data,
+        )
+        resp.raise_for_status()
+        task = resp.json()
+        task_id = task['id']
+
+        # Set custom fields
+        if client_name:
+            clickup.set_field(task_id, 'Client', client_name)
+        if hourly_rate:
+            clickup.set_field(task_id, 'Hourly Rate', hourly_rate)
+
+        return task
+
+    except Exception as e:
+        logger.error(f'Failed to create ClickUp task "{name}": {e}')
+        return None
+
 # ------------------------------------------------------------------ #
 #  Entry point                                                         #
 # ------------------------------------------------------------------ #
+# Start the background scheduler for Gmail polling
+scheduler = BackgroundScheduler()
+scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
+scheduler.start()
+logger.info('Email polling scheduler started (every 3 minutes)')
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
