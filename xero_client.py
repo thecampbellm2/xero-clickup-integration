@@ -145,26 +145,32 @@ class XeroClient:
     def create_invoice(
         self,
         contact_id: str,
-        description: str,
-        amount: float,
-        account_code: str,
-        tax_type: str,
-        line_amount_type: str,
+        line_items: list,
+        due_date: str,
         reference: str,
         branding_theme_id: str = '',
     ) -> dict:
-        """Create a DRAFT sales invoice and return the Xero invoice object."""
+        """
+        Create a DRAFT ACCREC invoice with one or more line items.
+
+        Each item in line_items is a dict:
+          { description, quantity, unit_amount, account_code }
+        """
         invoice = {
-            'Type':    'ACCREC',
-            'Status':  'DRAFT',
-            'Contact': {'ContactID': contact_id},
+            'Type':      'ACCREC',
+            'Status':    'DRAFT',
+            'Contact':   {'ContactID': contact_id},
             'Reference': reference,
-            'LineItems': [{
-                'Description': description,
-                'Quantity':    1.0,
-                'UnitAmount':  round(amount, 2),
-                'AccountCode': account_code,
-            }],
+            'DueDate':   due_date,
+            'LineItems': [
+                {
+                    'Description': item['description'],
+                    'Quantity':    round(float(item['quantity']), 2),
+                    'UnitAmount':  round(float(item['unit_amount']), 2),
+                    'AccountCode': item['account_code'],
+                }
+                for item in line_items
+            ],
         }
         if branding_theme_id:
             invoice['BrandingThemeID'] = branding_theme_id

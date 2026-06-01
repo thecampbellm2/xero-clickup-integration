@@ -164,3 +164,21 @@ class ClickUpClient:
         else:
             logger.error(f'Failed to add "{contact_name}" to Client dropdown: {resp.status_code} {resp.text}')
             return False
+
+    # ------------------------------------------------------------------ #
+    #  Batch invoicing support                                             #
+    # ------------------------------------------------------------------ #
+
+    def get_tasks_by_status(self, status: str) -> list:
+        """Return all open tasks in the Jobs list with the given status."""
+        try:
+            resp = requests.get(
+                f'{BASE}/list/{self.list_id}/task',
+                headers=self.headers,
+                params={'statuses[]': status, 'include_closed': 'false'}
+            )
+            resp.raise_for_status()
+            return resp.json().get('tasks', [])
+        except Exception as e:
+            logger.error(f'Failed to get tasks with status "{status}": {e}')
+            return []

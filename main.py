@@ -17,6 +17,9 @@ import os
 
 from flask import Flask, jsonify, redirect, request
 import requests
+import pytz
+from datetime import date
+from collections import defaultdict
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import config
@@ -54,8 +57,10 @@ gmail   = GmailClient(
 )
 
 # Status names that trigger automation (lowercase, must match ClickUp exactly)
-TRIGGER_DEPOSIT = 'send deposit invoice'
-TRIGGER_FINAL   = 'send final invoice'
+TRIGGER_DEPOSIT  = 'send deposit invoice'   # manual override trigger
+TRIGGER_FINAL    = 'send final invoice'     # manual override trigger
+PENDING_DEPOSIT  = 'deposit invoice pending' # auto landing status
+PENDING_FINAL    = 'final invoice pending'   # auto landing status
 
 
 # ------------------------------------------------------------------ #
@@ -136,6 +141,13 @@ def gmail_callback():
     except Exception as e:
         logger.error(f'Gmail auth error: {e}')
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/batch/invoices')
+def batch_invoices_manual():
+    """Manually trigger the batch invoice run — useful for testing or urgent batches."""
+    batch_invoices()
+    return jsonify({'status': 'done'}), 200
 
 
 @app.route('/gmail/process')
@@ -260,7 +272,6 @@ def handle_deposit_invoice(task_id: str):
         est_hours     = float(est_ms) / 3_600_000          # ms → hours
         deposit_hours = est_hours / 2
         rate          = float(hourly_rate)
-        amount        = round(deposit_hours * rate, 2)
         job_name      = task.get('name', 'Unknown Job')
 
         description = (
@@ -271,15 +282,16 @@ def handle_deposit_invoice(task_id: str):
         # --- Create invoice in Xero ---
         contact_id = xero.get_contact_id(client_name)
         invoice    = xero.create_invoice(
-            contact_id       = contact_id,
-            description      = description,
-            amount           = amount,
-            account_code     = config.XERO_ACCOUNT_CODE,
-            tax_type         = config.XERO_TAX_TYPE,
-            line_amount_type = config.XERO_LINE_AMOUNT_TYPE,
+            contact_id        = contact_id,
+            line_items        = [{
+                'description':  description,
+                'quantity':     deposit_hours,
+                'unit_amount':  rate,
+                'account_code': config.XERO_ACCOUNT_CODE,
+            }],
+            due_date          = date.today().strftime('%Y-%m-%d'),
             branding_theme_id = config.XERO_BRANDING_THEME_ID,
-            # Reference encodes task ID + type so we can find it from a Xero payment webhook
-            reference        = f'CU-{task_id}-deposit',
+            reference         = f'CU-{task_id}-deposit',
         )
 
         inv_number = invoice.get('InvoiceNumber', '')
@@ -342,7 +354,6 @@ def handle_final_invoice(task_id: str):
             )
             return
 
-        amount   = round(final_hrs * rate, 2)
         job_name = task.get('name', 'Unknown Job')
 
         description = (
@@ -355,11 +366,13 @@ def handle_final_invoice(task_id: str):
         contact_id = xero.get_contact_id(client_name)
         invoice    = xero.create_invoice(
             contact_id        = contact_id,
-            description       = description,
-            amount            = amount,
-            account_code      = config.XERO_ACCOUNT_CODE,
-            tax_type          = config.XERO_TAX_TYPE,
-            line_amount_type  = config.XERO_LINE_AMOUNT_TYPE,
+            line_items        = [{
+                'description':  description,
+                'quantity':     final_hrs,
+                'unit_amount':  rate,
+                'account_code': config.XERO_ACCOUNT_CODE,
+            }],
+            due_date          = date.today().strftime('%Y-%m-%d'),
             branding_theme_id = config.XERO_BRANDING_THEME_ID,
             reference         = f'CU-{task_id}-final',
         )
@@ -387,21 +400,28 @@ def handle_payment(invoice_id: str):
         if not invoice or invoice.get('Status') != 'PAID':
             return
 
-        reference = invoice.get('Reference', '')   # format: CU-{task_id}-deposit/final
-        if not reference.startswith('CU-'):
-            logger.info(f'Invoice {invoice_id} paid but not from this automation — skipping')
+        reference = invoice.get('Reference', '')
+        if not reference:
             return
 
-        parts = reference.split('-')  # ['CU', '{task_id}', 'deposit'|'final']
-        if len(parts) != 3:
-            logger.warning(f'Unexpected reference format: {reference}')
-            return
+        # Reference may contain multiple tasks: CU-taskid1-deposit,CU-taskid2-final
+        refs = [r.strip() for r in reference.split(',')]
+        updated = 0
+        for ref in refs:
+            if not ref.startswith('CU-'):
+                continue
+            parts = ref.split('-')   # ['CU', task_id, 'deposit'|'final']
+            if len(parts) != 3:
+                continue
+            task_id      = parts[1]
+            invoice_type = parts[2]
+            clickup.mark_invoice_paid(task_id, invoice_type)
+            updated += 1
 
-        task_id      = parts[1]
-        invoice_type = parts[2]   # 'deposit' or 'final'
-
-        clickup.mark_invoice_paid(task_id, invoice_type)
-        logger.info(f'Invoice {invoice_id} paid → task {task_id} ({invoice_type}) updated')
+        if updated:
+            logger.info(f'Invoice {invoice_id} paid → {updated} task(s) updated')
+        else:
+            logger.info(f'Invoice {invoice_id} paid but no CU- references found — skipping')
 
     except Exception as e:
         logger.error(f'handle_payment failed for invoice {invoice_id}: {e}')
@@ -550,7 +570,7 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
         # Auto-trigger deposit invoice if all required fields are present
         if client_name and hourly_rate and time_estimate_ms:
             logger.info(f'All fields present — auto-triggering deposit invoice for task {task_id}')
-            clickup.update_status(task_id, 'send deposit invoice')
+            clickup.update_status(task_id, PENDING_DEPOSIT)
         else:
             missing = [f for f, v in [('Client', client_name), ('Hourly Rate', hourly_rate), ('Time Estimate', time_estimate_ms)] if not v]
             logger.warning(f'Task {task_id} missing fields {missing} — left at Not Started for manual review')
@@ -578,14 +598,144 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
         logger.error(f'Failed to create ClickUp task "{name}": {e}')
         return None
 
+
+
+def batch_invoices():
+    """
+    3pm daily batch: find all tasks in 'deposit invoice pending' and
+    'final invoice pending', group by client, and create one consolidated
+    Xero invoice per client covering all pending items.
+    Runs at 3pm Sydney time via the scheduler.
+    """
+    try:
+        deposit_tasks = clickup.get_tasks_by_status(PENDING_DEPOSIT)
+        final_tasks   = clickup.get_tasks_by_status(PENDING_FINAL)
+        all_tasks     = deposit_tasks + final_tasks
+
+        if not all_tasks:
+            logger.info('Batch invoices: no pending tasks — nothing to do')
+            return
+
+        logger.info(f'Batch invoices: {len(deposit_tasks)} deposit + {len(final_tasks)} final tasks')
+
+        # Group tasks by client
+        client_groups = defaultdict(list)
+        for task in all_tasks:
+            fields      = clickup.parse_custom_fields(task)
+            client_name = fields.get('client', '').strip()
+            if not client_name:
+                logger.warning(f'Task {task["id"]} has no Client field — skipping')
+                continue
+            client_groups[client_name].append((task, fields))
+
+        today = date.today().strftime('%Y-%m-%d')
+
+        for client_name, task_list in client_groups.items():
+            try:
+                line_items         = []
+                task_refs          = []
+                task_updates       = []   # (task_id, inv_type, new_status)
+
+                for task, fields in task_list:
+                    task_id        = task['id']
+                    task_name      = task.get('name', 'Unknown Job')
+                    hourly_rate    = float(fields.get('hourly_rate') or 0)
+                    est_ms         = task.get('time_estimate') or 0
+                    est_hours      = float(est_ms) / 3_600_000
+                    deposit_hrs    = est_hours / 2
+                    current_status = task.get('status', {}).get('status', '').lower().strip()
+
+                    # Idempotency: skip if already invoiced
+                    if current_status == PENDING_DEPOSIT:
+                        if fields.get('deposit_invoice_number'):
+                            logger.info(f'Task {task_id} already has deposit invoice — skipping')
+                            continue
+                        if not hourly_rate or not est_ms:
+                            logger.warning(f'Task {task_id}: missing rate or estimate — skipping')
+                            continue
+                        desc = (
+                            f"Deposit \u2013 {task_name} \u2013 "
+                            f"{deposit_hrs:.1f}hrs (50% of assumed {est_hours:.1f}hrs)"
+                        )
+                        line_items.append({
+                            'description':  desc,
+                            'quantity':     deposit_hrs,
+                            'unit_amount':  hourly_rate,
+                            'account_code': config.XERO_ACCOUNT_CODE,
+                        })
+                        task_refs.append(f'CU-{task_id}-deposit')
+                        task_updates.append((task_id, 'deposit', STATUS_DEPOSIT_INVOICED))
+
+                    elif current_status == PENDING_FINAL:
+                        if fields.get('final_invoice_number'):
+                            logger.info(f'Task {task_id} already has final invoice — skipping')
+                            continue
+                        total_hours = float(fields.get('total_hours_invoiced') or 0)
+                        if not total_hours or not hourly_rate or not est_ms:
+                            logger.warning(f'Task {task_id}: missing hours/rate/estimate — skipping')
+                            continue
+                        final_hrs = total_hours - deposit_hrs
+                        if final_hrs <= 0:
+                            logger.warning(f'Task {task_id}: final hours {final_hrs:.2f} <= 0 — skipping')
+                            continue
+                        desc = (
+                            f"Final \u2013 {task_name} \u2013 "
+                            f"{final_hrs:.1f}hrs "
+                            f"({total_hours:.1f}hrs total less {deposit_hrs:.1f}hrs deposit)"
+                        )
+                        line_items.append({
+                            'description':  desc,
+                            'quantity':     final_hrs,
+                            'unit_amount':  hourly_rate,
+                            'account_code': config.XERO_ACCOUNT_CODE,
+                        })
+                        task_refs.append(f'CU-{task_id}-final')
+                        task_updates.append((task_id, 'final', STATUS_FINAL_INVOICED))
+
+                if not line_items:
+                    logger.info(f'No valid line items for {client_name} — skipping')
+                    continue
+
+                # Create one invoice for this client
+                contact_id = xero.get_contact_id(client_name)
+                invoice    = xero.create_invoice(
+                    contact_id        = contact_id,
+                    line_items        = line_items,
+                    due_date          = today,
+                    reference         = ','.join(task_refs),
+                    branding_theme_id = config.XERO_BRANDING_THEME_ID,
+                )
+
+                inv_number = invoice.get('InvoiceNumber', '')
+                logger.info(
+                    f'Batch invoice {inv_number} created for {client_name} '
+                    f'({len(line_items)} line item(s))'
+                )
+
+                # Write invoice number back to all tasks and update statuses
+                for task_id, inv_type, new_status in task_updates:
+                    inv_field    = 'Deposit Invoice #' if inv_type == 'deposit' else 'Final Invoice #'
+                    status_field = 'Deposit Invoice Status' if inv_type == 'deposit' else 'Final Invoice Status'
+                    clickup.set_field(task_id, inv_field,    inv_number)
+                    clickup.set_field(task_id, status_field, 'Invoiced')
+                    clickup.update_status(task_id, new_status)
+
+            except Exception as e:
+                logger.error(f'Batch invoice error for client {client_name}: {e}')
+
+    except Exception as e:
+        logger.error(f'batch_invoices failed: {e}')
+
 # ------------------------------------------------------------------ #
 #  Entry point                                                         #
 # ------------------------------------------------------------------ #
 # Start the background scheduler for Gmail polling
-scheduler = BackgroundScheduler()
+sydney = pytz.timezone('Australia/Sydney')
+scheduler = BackgroundScheduler(timezone=sydney)
 scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
+scheduler.add_job(batch_invoices, 'cron', hour=15, minute=0, id='batch_invoices')
 scheduler.start()
-logger.info('Email polling scheduler started (every 3 minutes)')
+logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm Sydney')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
