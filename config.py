@@ -27,3 +27,7 @@ GMAIL_REDIRECT_URI  = os.environ.get('GMAIL_REDIRECT_URI')   # e.g. https://your
 
 # Anthropic (for email parsing)
 ANTHROPIC_API_KEY   = os.environ.get('ANTHROPIC_API_KEY')
+
+# GitHub Gist (persistent token storage)
+GITHUB_TOKEN  = os.environ.get('GITHUB_TOKEN', '')
+TOKEN_GIST_ID = os.environ.get('TOKEN_GIST_ID', '')

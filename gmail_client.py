@@ -7,6 +7,8 @@ import logging
 from urllib.parse import urlencode
 import secrets
 
+import config
+from token_store import load_tokens, save_tokens
 logger = logging.getLogger(__name__)
 
 AUTH_URL     = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -64,15 +66,11 @@ class GmailClient:
     # ------------------------------------------------------------------ #
 
     def _load_tokens(self) -> dict:
-        if os.path.exists(TOKEN_FILE):
-            with open(TOKEN_FILE) as f:
-                return json.load(f)
-        return {}
+        return load_tokens(TOKEN_FILE, 'gmail', config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
 
     def _save_tokens(self, tokens: dict):
         self._tokens = tokens
-        with open(TOKEN_FILE, 'w') as f:
-            json.dump(tokens, f, indent=2)
+        save_tokens(TOKEN_FILE, 'gmail', tokens, config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
 
     def _get_access_token(self) -> str:
         if not self._tokens:
