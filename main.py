@@ -175,10 +175,13 @@ def clickup_webhook():
 
     logger.info(f'ClickUp event: task {task_id} → "{new_status}"')
 
+    # Process in a background thread so we respond to ClickUp immediately
+    # (prevents ClickUp timing out and retrying, which caused duplicate invoices)
+    import threading
     if new_status == TRIGGER_DEPOSIT:
-        handle_deposit_invoice(task_id)
+        threading.Thread(target=handle_deposit_invoice, args=(task_id,), daemon=True).start()
     elif new_status == TRIGGER_FINAL:
-        handle_final_invoice(task_id)
+        threading.Thread(target=handle_final_invoice, args=(task_id,), daemon=True).start()
 
     return jsonify({'status': 'ok'}), 200
 
@@ -232,6 +235,12 @@ def handle_deposit_invoice(task_id: str):
     try:
         task   = clickup.get_task(task_id)
         fields = clickup.parse_custom_fields(task)
+
+        # --- Idempotency check: skip if deposit invoice already exists ---
+        existing_invoice = fields.get('deposit_invoice_number')
+        if existing_invoice:
+            logger.info(f'Task {task_id} already has deposit invoice {existing_invoice} — skipping')
+            return
 
         # --- Validate required fields ---
         client_name = fields.get('client')
@@ -294,6 +303,12 @@ def handle_final_invoice(task_id: str):
     try:
         task   = clickup.get_task(task_id)
         fields = clickup.parse_custom_fields(task)
+
+        # --- Idempotency check: skip if final invoice already exists ---
+        existing_invoice = fields.get('final_invoice_number')
+        if existing_invoice:
+            logger.info(f'Task {task_id} already has final invoice {existing_invoice} — skipping')
+            return
 
         # --- Validate required fields ---
         client_name          = fields.get('client')
