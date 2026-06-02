@@ -19,7 +19,8 @@ PROCESSED_LABEL = 'NEPM-Processed'
 
 SCOPES = ' '.join([
     'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/gmail.modify',   # needed to mark as read / add labels
+    'https://www.googleapis.com/auth/gmail.modify',   # mark as read / add labels
+    'https://www.googleapis.com/auth/gmail.send',     # send notification emails
 ])
 
 
@@ -251,3 +252,31 @@ class GmailClient:
 
     def is_authenticated(self) -> bool:
         return bool(self._tokens)
+
+    # ------------------------------------------------------------------ #
+    #  Sending notification emails                                         #
+    # ------------------------------------------------------------------ #
+
+    def send_email(self, to_list: list, subject: str, body: str):
+        """Send a plain-text email from nepmclickup@gmail.com."""
+        import base64
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From']    = 'NEPM Automation <nepmclickup@gmail.com>'
+        msg['To']      = ', '.join(to_list)
+        msg.attach(MIMEText(body, 'plain'))
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        resp = requests.post(
+            'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+            headers=self._headers(),
+            json={'raw': raw}
+        )
+        if resp.ok:
+            logger.info(f'Notification sent to {to_list}: {subject}')
+        else:
+            logger.error(f'Failed to send notification email: {resp.status_code} {resp.text}')

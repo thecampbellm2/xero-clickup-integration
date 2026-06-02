@@ -27,6 +27,7 @@ from clickup_client import ClickUpClient, STATUS_DEPOSIT_INVOICED, STATUS_FINAL_
 from xero_client import XeroClient
 from gmail_client import GmailClient
 from email_parser import parse_job_email
+import notifier
 
 # ------------------------------------------------------------------ #
 #  Logging                                                             #
@@ -295,7 +296,7 @@ def handle_deposit_invoice(task_id: str):
         )
 
         inv_number = invoice.get('InvoiceNumber', '')
-        logger.info(f'Deposit invoice {inv_number} created (task {task_id}, ${amount:.2f})')
+        logger.info(f'Deposit invoice {inv_number} created (task {task_id}, {deposit_hours:.1f}hrs @ ${rate:.2f}/hr)')
 
         # --- Update ClickUp ---
         clickup.set_field(task_id, 'Deposit Invoice #',      inv_number)
@@ -304,6 +305,7 @@ def handle_deposit_invoice(task_id: str):
 
     except Exception as e:
         logger.error(f'handle_deposit_invoice failed for task {task_id}: {e}')
+        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'deposit')
 
 
 def handle_final_invoice(task_id: str):
@@ -378,7 +380,7 @@ def handle_final_invoice(task_id: str):
         )
 
         inv_number = invoice.get('InvoiceNumber', '')
-        logger.info(f'Final invoice {inv_number} created (task {task_id}, ${amount:.2f})')
+        logger.info(f'Final invoice {inv_number} created (task {task_id}, {final_hrs:.1f}hrs @ ${rate:.2f}/hr)')
 
         # --- Update ClickUp ---
         clickup.set_field(task_id, 'Final Invoice #',      inv_number)
@@ -387,6 +389,7 @@ def handle_final_invoice(task_id: str):
 
     except Exception as e:
         logger.error(f'handle_final_invoice failed for task {task_id}: {e}')
+        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'final')
 
 
 def handle_payment(invoice_id: str):
@@ -446,8 +449,8 @@ def handle_new_contact(contact_id: str):
             return
 
         added = clickup.add_client_option(name)
-        if added:
-            logger.info(f'New Xero contact "{name}" added to ClickUp Client dropdown')
+        if not added:
+            notifier.new_contact_action_required(gmail, config.NOTIFICATION_EMAILS, name)
 
     except Exception as e:
         logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
@@ -486,6 +489,7 @@ def process_job_emails():
 
                 if not data:
                     logger.error(f'Could not parse email {email["id"]} — skipping')
+                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, email['subject'], 'Claude API could not extract job details')
                     gmail.mark_processed(email['id'])
                     continue
 
@@ -494,8 +498,22 @@ def process_job_emails():
                 estimated_hours = data.get('estimated_hours')
                 hourly_rate     = data.get('hourly_rate')
 
+                # Fuzzy fallback: if Claude returned no client, try Python difflib
+                if not client_name and client_options:
+                    import difflib
+                    matches = difflib.get_close_matches(
+                        email['subject'] + ' ' + (email['body'] or ''),
+                        client_options,
+                        n=1,
+                        cutoff=0.3
+                    )
+                    if matches:
+                        client_name = matches[0]
+                        logger.info(f'Fuzzy matched client "{client_name}" from email text')
+
                 if not client_name:
                     logger.warning(f'No client match for email "{email["subject"]}" — task will have blank Client field')
+                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, email['subject'], 'Could not match client name to any known client in ClickUp dropdown')
 
                 # Convert hours to milliseconds for ClickUp time estimate
                 est_ms = int(estimated_hours * 3_600_000) if estimated_hours else None
@@ -722,6 +740,7 @@ def batch_invoices():
 
             except Exception as e:
                 logger.error(f'Batch invoice error for client {client_name}: {e}')
+                notifier.batch_failed(gmail, config.NOTIFICATION_EMAILS, client_name, str(e))
 
     except Exception as e:
         logger.error(f'batch_invoices failed: {e}')

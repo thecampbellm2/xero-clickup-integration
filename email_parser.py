@@ -48,7 +48,7 @@ Return this exact JSON structure:
 
 Rules:
 - job_title: extract the location/project name only, remove client name and other details
-- client: must exactly match one of the known clients listed, or be empty string ""
+- client: match to the closest known client even if the email uses a shortened or informal version (e.g. "Finnbarr construction" should match "Finnbarr Construction Pty Ltd", "BR Masonry" should match "BR Masonry Pty Ltd"). Only leave blank if there is genuinely no recognisable match.
 - estimated_hours: number only (e.g. 6.0), or null if not mentioned
 - hourly_rate: number only (e.g. 130.0), or null if not mentioned
 - Return ONLY the JSON object, nothing else"""

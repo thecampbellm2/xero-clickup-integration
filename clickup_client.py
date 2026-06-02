@@ -133,8 +133,10 @@ class ClickUpClient:
 
     def add_client_option(self, contact_name: str) -> bool:
         """
-        Add a new option to the Client dropdown field.
-        Returns True if added successfully, False if already exists or failed.
+        Check if a new Xero contact already exists in the Client dropdown.
+        ClickUp's API does not support adding dropdown options programmatically,
+        so if the contact is new we log a clear reminder to add it manually.
+        Returns True if already exists, False if manual action is needed.
         """
         field = self._fields.get('client')
         if not field:
@@ -147,23 +149,15 @@ class ClickUpClient:
         # Check if option already exists
         existing = [o['name'].lower() for o in field.get('type_config', {}).get('options', [])]
         if contact_name.lower() in existing:
-            logger.info(f'Client "{contact_name}" already exists in dropdown — skipping')
-            return False
-
-        # Add the new option via ClickUp API
-        field_id = field['id']
-        resp = requests.post(
-            f'{BASE}/list/{self.list_id}/field/{field_id}/option',
-            headers=self.headers,
-            json={'name': contact_name}
-        )
-        if resp.ok:
-            logger.info(f'Added "{contact_name}" to Client dropdown')
-            self._load_fields()  # Refresh cache so new option is usable immediately
+            logger.info(f'New Xero contact "{contact_name}" already in Client dropdown — no action needed')
             return True
-        else:
-            logger.error(f'Failed to add "{contact_name}" to Client dropdown: {resp.status_code} {resp.text}')
-            return False
+
+        # ClickUp API does not support adding dropdown options via API
+        # Log a clear reminder for manual action
+        logger.warning(
+            f'ACTION REQUIRED: New Xero contact "{contact_name}" needs to be manually added '            f'to the Client dropdown in ClickUp (Settings → Custom Fields → Client → Add option)'
+        )
+        return False
 
     # ------------------------------------------------------------------ #
     #  Batch invoicing support                                             #
