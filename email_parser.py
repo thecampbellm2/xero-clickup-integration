@@ -47,7 +47,9 @@ Return this exact JSON structure:
 }}
 
 Rules:
-- job_title: extract the location/project name only, remove client name and other details
+- PRIORITY: The subject line is the primary source of truth for billing details (hourly_rate, estimated_hours, client). If the subject and body contain conflicting values for these fields, always use the subject line value.
+- The body is supplementary — use it only to fill in a more complete job_title or project name if the subject is vague, or to find the client if not in the subject.
+- job_title: extract the location/project name only, remove client name, rate, and hours
 - client: match to the closest known client even if the email uses a shortened or informal version (e.g. "Finnbarr construction" should match "Finnbarr Construction Pty Ltd", "BR Masonry" should match "BR Masonry Pty Ltd"). Only leave blank if there is genuinely no recognisable match.
 - estimated_hours: number only (e.g. 6.0), or null if not mentioned
 - hourly_rate: number only (e.g. 130.0), or null if not mentioned
