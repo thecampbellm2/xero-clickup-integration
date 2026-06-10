@@ -1,282 +1,174 @@
-import requests
-import json
-import os
-import time
-import base64
+"""
+Gmail client using IMAP/SMTP with an App Password.
+No OAuth required — App Passwords don't expire unless explicitly revoked.
+"""
+import imaplib
+import smtplib
+import email
 import logging
-from urllib.parse import urlencode
-import secrets
+import re
+from email.header import decode_header
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-import config
-from token_store import load_tokens, save_tokens
 logger = logging.getLogger(__name__)
 
-AUTH_URL     = 'https://accounts.google.com/o/oauth2/v2/auth'
-TOKEN_URL    = 'https://oauth2.googleapis.com/token'
-API_BASE     = 'https://gmail.googleapis.com/gmail/v1/users/me'
-TOKEN_FILE   = 'gmail_tokens.json'
-PROCESSED_LABEL = 'NEPM-Processed'
-
-SCOPES = ' '.join([
-    'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/gmail.modify',   # mark as read / add labels
-    'https://www.googleapis.com/auth/gmail.send',     # send notification emails
-])
+IMAP_HOST = 'imap.gmail.com'
+IMAP_PORT = 993
+SMTP_HOST = 'smtp.gmail.com'
+SMTP_PORT = 587
 
 
 class GmailClient:
-    def __init__(self, client_id, client_secret, redirect_uri):
-        self.client_id     = client_id
-        self.client_secret = client_secret
-        self.redirect_uri  = redirect_uri
-        self._tokens       = self._load_tokens()
-        self._label_id     = None   # cached label ID for 'NEPM-Processed'
+    def __init__(self, username: str, app_password: str):
+        self.username     = username
+        self.app_password = app_password
+
+    def is_authenticated(self) -> bool:
+        return bool(self.username and self.app_password)
 
     # ------------------------------------------------------------------ #
-    #  OAuth flow                                                          #
+    #  IMAP connection                                                     #
     # ------------------------------------------------------------------ #
 
-    def get_auth_url(self) -> str:
-        params = {
-            'response_type':  'code',
-            'client_id':      self.client_id,
-            'redirect_uri':   self.redirect_uri,
-            'scope':          SCOPES,
-            'access_type':    'offline',   # needed for refresh token
-            'prompt':         'consent',   # forces refresh token on every auth
-            'state':          secrets.token_urlsafe(16),
-        }
-        return f'{AUTH_URL}?{urlencode(params)}'
-
-    def exchange_code(self, code: str):
-        resp = requests.post(TOKEN_URL, data={
-            'grant_type':   'authorization_code',
-            'code':         code,
-            'redirect_uri': self.redirect_uri,
-            'client_id':    self.client_id,
-            'client_secret': self.client_secret,
-        })
-        resp.raise_for_status()
-        tokens = resp.json()
-        tokens['expires_at'] = time.time() + tokens.get('expires_in', 3600) - 60
-        self._save_tokens(tokens)
-        logger.info('Gmail connected successfully')
-
-    # ------------------------------------------------------------------ #
-    #  Token management                                                    #
-    # ------------------------------------------------------------------ #
-
-    def _load_tokens(self) -> dict:
-        return load_tokens(TOKEN_FILE, 'gmail', config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
-
-    def _save_tokens(self, tokens: dict):
-        self._tokens = tokens
-        save_tokens(TOKEN_FILE, 'gmail', tokens, config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
-
-    def _get_access_token(self) -> str:
-        if not self._tokens:
-            raise Exception('Gmail not authenticated. Visit /gmail/auth to connect.')
-
-        if time.time() >= self._tokens.get('expires_at', 0):
-            logger.info('Gmail token expired — refreshing')
-            resp = requests.post(TOKEN_URL, data={
-                'grant_type':    'refresh_token',
-                'refresh_token': self._tokens['refresh_token'],
-                'client_id':     self.client_id,
-                'client_secret': self.client_secret,
-            })
-            resp.raise_for_status()
-            new = resp.json()
-            new['expires_at']    = time.time() + new.get('expires_in', 3600) - 60
-            new['refresh_token'] = self._tokens['refresh_token']   # preserve refresh token
-            self._save_tokens(new)
-
-        return self._tokens['access_token']
-
-    def _headers(self) -> dict:
-        return {'Authorization': f'Bearer {self._get_access_token()}'}
-
-    # ------------------------------------------------------------------ #
-    #  Label management                                                    #
-    # ------------------------------------------------------------------ #
-
-    def _get_or_create_label(self) -> str:
-        """Get or create the NEPM-Processed label, return its ID."""
-        if self._label_id:
-            return self._label_id
-
-        # List existing labels
-        resp = requests.get(f'{API_BASE}/labels', headers=self._headers())
-        resp.raise_for_status()
-        for label in resp.json().get('labels', []):
-            if label['name'] == PROCESSED_LABEL:
-                self._label_id = label['id']
-                return self._label_id
-
-        # Create it
-        resp = requests.post(
-            f'{API_BASE}/labels',
-            headers=self._headers(),
-            json={'name': PROCESSED_LABEL, 'labelListVisibility': 'labelHide', 'messageListVisibility': 'hide'}
-        )
-        resp.raise_for_status()
-        self._label_id = resp.json()['id']
-        logger.info(f'Created Gmail label: {PROCESSED_LABEL}')
-        return self._label_id
+    def _connect(self):
+        mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        mail.login(self.username, self.app_password)
+        return mail
 
     # ------------------------------------------------------------------ #
     #  Reading emails                                                      #
     # ------------------------------------------------------------------ #
 
     def get_unprocessed_emails(self) -> list:
-        """
-        Return unread emails in the inbox that haven't been processed yet.
-        Excludes anything already labelled NEPM-Processed.
-        """
-        label_id = self._get_or_create_label()
-        query    = f'is:unread in:inbox -label:{PROCESSED_LABEL}'
-
-        resp = requests.get(
-            f'{API_BASE}/messages',
-            headers=self._headers(),
-            params={'q': query, 'maxResults': 10}
-        )
-        resp.raise_for_status()
-        messages = resp.json().get('messages', [])
-
+        """Return all unread emails from the inbox."""
         emails = []
-        for msg in messages:
-            detail = self._get_message(msg['id'])
-            if detail:
-                emails.append(detail)
+        mail   = None
+        try:
+            mail = self._connect()
+            mail.select('INBOX')
+            status, data = mail.search(None, 'UNSEEN')
+            if status != 'OK':
+                return []
+            msg_ids = data[0].split()
+            logger.info(f'Found {len(msg_ids)} unread email(s)')
+            for msg_id in msg_ids:
+                try:
+                    detail = self._fetch_message(mail, msg_id)
+                    if detail:
+                        emails.append(detail)
+                except Exception as e:
+                    logger.error(f'Error fetching message {msg_id}: {e}')
+        except Exception as e:
+            raise   # Re-raise so caller can notify
+        finally:
+            if mail:
+                try:
+                    mail.close()
+                    mail.logout()
+                except Exception:
+                    pass
         return emails
 
-    def _get_message(self, message_id: str) -> dict:
-        resp = requests.get(
-            f'{API_BASE}/messages/{message_id}',
-            headers=self._headers(),
-            params={'format': 'full'}
-        )
-        resp.raise_for_status()
-        msg = resp.json()
+    def _fetch_message(self, mail, msg_id) -> dict:
+        """Fetch and parse a single IMAP message."""
+        status, data = mail.fetch(msg_id, '(RFC822)')
+        if status != 'OK':
+            return None
 
-        headers     = {h['name']: h['value'] for h in msg.get('payload', {}).get('headers', [])}
-        subject     = headers.get('Subject', '')
-        sender      = headers.get('From', '')
-        body        = self._extract_body(msg.get('payload', {}))
-        attachments = self._extract_attachments(msg.get('payload', {}))
+        msg      = email.message_from_bytes(data[0][1])
+        subject  = self._decode_str(msg.get('Subject', ''))
+        sender   = msg.get('From', '')
+        body     = ''
+        attachments = []
+
+        for part in msg.walk():
+            content_type        = part.get_content_type()
+            content_disposition = str(part.get('Content-Disposition', ''))
+
+            if 'attachment' in content_disposition:
+                filename = part.get_filename()
+                if filename:
+                    attachments.append({
+                        'filename':  self._decode_str(filename),
+                        'mime_type': content_type,
+                        'data':      part.get_payload(decode=True),
+                    })
+            elif content_type == 'text/plain' and not body:
+                try:
+                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                except Exception:
+                    pass
+            elif content_type == 'text/html' and not body:
+                try:
+                    html = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                    body = re.sub(r'<[^>]+>', ' ', html)
+                    body = re.sub(r'[ \t]+', ' ', body).strip()
+                except Exception:
+                    pass
 
         return {
-            'id':          message_id,
+            'id':          msg_id.decode(),
             'subject':     subject,
             'sender':      sender,
             'body':        body,
-            'attachments': attachments,   # list of {attachment_id, filename, mime_type}
+            'attachments': attachments,
         }
 
-    def _extract_attachments(self, payload: dict) -> list:
-        """Return a list of attachment metadata from the message payload."""
-        attachments = []
-        for part in payload.get('parts', []):
-            filename      = part.get('filename', '')
-            attachment_id = part.get('body', {}).get('attachmentId')
-            mime_type     = part.get('mimeType', 'application/octet-stream')
-            if filename and attachment_id:
-                attachments.append({
-                    'attachment_id': attachment_id,
-                    'filename':      filename,
-                    'mime_type':     mime_type,
-                })
-            # Recurse into nested multipart
-            if part.get('parts'):
-                attachments.extend(self._extract_attachments(part))
-        return attachments
-
-    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
-        """Download and return the raw bytes of a Gmail attachment."""
-        resp = requests.get(
-            f'{API_BASE}/messages/{message_id}/attachments/{attachment_id}',
-            headers=self._headers()
-        )
-        resp.raise_for_status()
-        data = resp.json().get('data', '')
-        return base64.urlsafe_b64decode(data)
-
-    def _extract_body(self, payload: dict) -> str:
-        """Extract plain text body from a Gmail message payload."""
-        # Direct body
-        if payload.get('body', {}).get('data'):
-            return base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', errors='ignore')
-
-        # Multipart — look for text/plain first
-        for part in payload.get('parts', []):
-            if part.get('mimeType') == 'text/plain' and part.get('body', {}).get('data'):
-                return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
-
-        # Recurse into nested multipart parts
-        for part in payload.get('parts', []):
-            if part.get('mimeType', '').startswith('multipart/'):
-                result = self._extract_body(part)
-                if result:
-                    return result
-
-        # Fallback: strip HTML tags from text/html part
-        import re
-        for part in payload.get('parts', []):
-            if part.get('mimeType') == 'text/html' and part.get('body', {}).get('data'):
-                html = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
-                text = re.sub(r'<[^>]+>', ' ', html)
-                text = re.sub(r'[ \t]+', ' ', text)
-                text = re.sub(r'\n{3,}', '\n\n', text)
-                return text.strip()
-
-        return ''
+    def _decode_str(self, value: str) -> str:
+        """Decode an encoded email header string."""
+        if not value:
+            return ''
+        parts  = decode_header(value)
+        result = ''
+        for part, charset in parts:
+            if isinstance(part, bytes):
+                result += part.decode(charset or 'utf-8', errors='ignore')
+            else:
+                result += part
+        return result
 
     # ------------------------------------------------------------------ #
-    #  Marking emails as processed                                         #
+    #  Marking as processed                                                #
     # ------------------------------------------------------------------ #
 
     def mark_processed(self, message_id: str):
-        """Mark an email as read and add the NEPM-Processed label."""
-        label_id = self._get_or_create_label()
-        resp = requests.post(
-            f'{API_BASE}/messages/{message_id}/modify',
-            headers=self._headers(),
-            json={
-                'addLabelIds':    [label_id],
-                'removeLabelIds': ['UNREAD'],
-            }
-        )
-        resp.raise_for_status()
-        logger.info(f'Message {message_id} marked as processed')
-
-    def is_authenticated(self) -> bool:
-        return bool(self._tokens)
+        """Mark an email as read so it won't be picked up again."""
+        mail = None
+        try:
+            mail = self._connect()
+            mail.select('INBOX')
+            mail.store(message_id.encode(), '+FLAGS', '\\Seen')
+            logger.info(f'Message {message_id} marked as processed')
+        except Exception as e:
+            logger.error(f'Could not mark message {message_id} as read: {e}')
+        finally:
+            if mail:
+                try:
+                    mail.close()
+                    mail.logout()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     #  Sending notification emails                                         #
     # ------------------------------------------------------------------ #
 
     def send_email(self, to_list: list, subject: str, body: str):
-        """Send a plain-text email from nepmclickup@gmail.com."""
-        import base64
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
+        """Send a plain-text email via SMTP using the App Password."""
+        try:
+            msg            = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From']    = f'NEPM Automation <{self.username}>'
+            msg['To']      = ', '.join(to_list)
+            msg.attach(MIMEText(body, 'plain'))
 
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From']    = 'NEPM Automation <nepmclickup@gmail.com>'
-        msg['To']      = ', '.join(to_list)
-        msg.attach(MIMEText(body, 'plain'))
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(self.username, self.app_password)
+                server.sendmail(self.username, to_list, msg.as_string())
 
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-        resp = requests.post(
-            'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
-            headers=self._headers(),
-            json={'raw': raw}
-        )
-        if resp.ok:
-            logger.info(f'Notification sent to {to_list}: {subject}')
-        else:
-            logger.error(f'Failed to send notification email: {resp.status_code} {resp.text}')
+            logger.info(f'Notification sent → {to_list}: {subject}')
+        except Exception as e:
+            logger.error(f'Failed to send notification email: {e}')

@@ -20,10 +20,9 @@ XERO_BRANDING_THEME_ID = os.environ.get('XERO_BRANDING_THEME_ID', '')  # fill af
 XERO_TAX_TYPE         = os.environ.get('XERO_TAX_TYPE', 'OUTPUT2')  # OUTPUT2 = GST on income (Australia)
 XERO_LINE_AMOUNT_TYPE = os.environ.get('XERO_LINE_AMOUNT_TYPE', 'EXCLUSIVE')  # prices are ex-GST
 
-# Gmail
-GMAIL_CLIENT_ID     = os.environ.get('GMAIL_CLIENT_ID')
-GMAIL_CLIENT_SECRET = os.environ.get('GMAIL_CLIENT_SECRET')
-GMAIL_REDIRECT_URI  = os.environ.get('GMAIL_REDIRECT_URI')   # e.g. https://your-app.onrender.com/gmail/callback
+# Gmail (IMAP/SMTP — App Password, no OAuth)
+GMAIL_USERNAME    = os.environ.get('GMAIL_USERNAME', 'nepmclickup@gmail.com')
+GMAIL_APP_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD', '')
 
 # Anthropic (for email parsing)
 ANTHROPIC_API_KEY   = os.environ.get('ANTHROPIC_API_KEY')

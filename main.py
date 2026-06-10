@@ -51,11 +51,7 @@ xero    = XeroClient(
     config.XERO_WEBHOOK_KEY,
 )
 
-gmail   = GmailClient(
-    config.GMAIL_CLIENT_ID,
-    config.GMAIL_CLIENT_SECRET,
-    config.GMAIL_REDIRECT_URI,
-)
+gmail   = GmailClient(config.GMAIL_USERNAME, config.GMAIL_APP_PASSWORD)
 
 # Status names that trigger automation (lowercase, must match ClickUp exactly)
 TRIGGER_DEPOSIT  = 'send deposit invoice'   # manual override trigger
@@ -120,28 +116,6 @@ def xero_info():
         return jsonify({'error': str(e)}), 500
 
 
-
-
-# ------------------------------------------------------------------ #
-#  Gmail OAuth                                                         #
-# ------------------------------------------------------------------ #
-@app.route('/gmail/auth')
-def gmail_auth():
-    """Open in browser to connect the nepmclickup@gmail.com account."""
-    return redirect(gmail.get_auth_url())
-
-
-@app.route('/gmail/callback')
-def gmail_callback():
-    code = request.args.get('code')
-    if not code:
-        return jsonify({'error': 'No authorisation code received from Google.'}), 400
-    try:
-        gmail.exchange_code(code)
-        return jsonify({'message': 'Gmail connected successfully! You can close this tab.'}), 200
-    except Exception as e:
-        logger.error(f'Gmail auth error: {e}')
-        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/batch/invoices')
@@ -593,11 +567,13 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
             missing = [f for f, v in [('Client', client_name), ('Hourly Rate', hourly_rate), ('Time Estimate', time_estimate_ms)] if not v]
             logger.warning(f'Task {task_id} missing fields {missing} — left at Not Started for manual review')
 
-        # Upload attachments
-        if attachments and message_id:
+        # Upload attachments (data already included from IMAP fetch)
+        if attachments:
             for att in attachments:
                 try:
-                    file_bytes = gmail.download_attachment(message_id, att['attachment_id'])
+                    file_bytes = att.get('data')
+                    if not file_bytes:
+                        continue
                     upload_resp = requests.post(
                         f'https://api.clickup.com/api/v2/task/{task_id}/attachment',
                         headers={'Authorization': config.CLICKUP_API_TOKEN},
