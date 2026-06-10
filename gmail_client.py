@@ -72,11 +72,12 @@ class GmailClient:
 
     def _fetch_message(self, mail, msg_id) -> dict:
         """Fetch and parse a single IMAP message."""
-        status, data = mail.fetch(msg_id, '(RFC822)')
+        status, data = mail.fetch(msg_id, '(BODY.PEEK[])')
         if status != 'OK':
             return None
 
-        msg      = email.message_from_bytes(data[0][1])
+        raw = data[0][1] if isinstance(data[0][1], bytes) else data[0][1]
+        msg      = email.message_from_bytes(raw)
         subject  = self._decode_str(msg.get('Subject', ''))
         sender   = msg.get('From', '')
         body     = ''

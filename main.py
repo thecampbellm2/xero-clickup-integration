@@ -127,9 +127,10 @@ def batch_invoices_manual():
 
 @app.route('/gmail/process')
 def gmail_process_manual():
-    """Manually trigger email processing (useful for testing)."""
-    process_job_emails()
-    return jsonify({'status': 'done'}), 200
+    """Manually trigger email processing — runs in background to avoid timeout."""
+    import threading
+    threading.Thread(target=process_job_emails, daemon=True).start()
+    return jsonify({'status': 'processing started'}), 200
 
 # ------------------------------------------------------------------ #
 #  ClickUp webhook                                                     #
