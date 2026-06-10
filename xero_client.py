@@ -149,15 +149,17 @@ class XeroClient:
         due_date: str,
         reference: str,
         branding_theme_id: str = '',
+        credit_note: bool = False,
     ) -> dict:
         """
-        Create a DRAFT ACCREC invoice with one or more line items.
+        Create a DRAFT invoice or credit note with one or more line items.
+        Set credit_note=True to create an ACCRECCREDIT instead of ACCREC.
 
         Each item in line_items is a dict:
           { description, quantity, unit_amount, account_code }
         """
         invoice = {
-            'Type':      'ACCREC',
+            'Type':      'ACCRECCREDIT' if credit_note else 'ACCREC',
             'Status':    'DRAFT',
             'Contact':   {'ContactID': contact_id},
             'Reference': reference,
@@ -220,3 +222,35 @@ class XeroClient:
             hmac.new(self.webhook_key.encode(), payload, hashlib.sha256).digest()
         ).decode()
         return hmac.compare_digest(computed, signature)
+
+    # ------------------------------------------------------------------ #
+    #  Daily summary queries                                               #
+    # ------------------------------------------------------------------ #
+
+    def get_todays_documents(self) -> dict:
+        """
+        Return all automation-created invoices and credit notes from today.
+        Returns { 'invoices': [...], 'credit_notes': [...] }
+        """
+        from datetime import date
+        import pytz
+        today = date.today()
+        date_filter = f'Date=DateTime({today.year},{today.month},{today.day})'
+
+        def fetch(endpoint):
+            resp = requests.get(
+                f'{API_BASE}/{endpoint}',
+                headers=self._headers(),
+                params={'where': date_filter, 'order': 'UpdatedDateUTC DESC'}
+            )
+            resp.raise_for_status()
+            key = 'Invoices' if endpoint == 'Invoices' else 'CreditNotes'
+            return [
+                doc for doc in resp.json().get(key, [])
+                if str(doc.get('Reference', '')).startswith('CU-')
+            ]
+
+        return {
+            'invoices':     fetch('Invoices'),
+            'credit_notes': fetch('CreditNotes'),
+        }
