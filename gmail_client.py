@@ -159,24 +159,42 @@ class GmailClient:
     #  Sending notification emails                                         #
     # ------------------------------------------------------------------ #
 
-    def send_email(self, to_list: list, subject: str, body: str):
-        """Send a plain-text email via SMTP using the App Password."""
+    def send_email(self, to_list: list, subject: str, body: str,
+                   html_body: str = '', sendgrid_api_key: str = ''):
+        """Send email via SendGrid HTTP API (avoids Render SMTP port blocking)."""
+        if not sendgrid_api_key:
+            logger.error('SENDGRID_API_KEY not set — cannot send email')
+            return
         try:
-            msg            = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From']    = f'NEPM Automation <{self.username}>'
-            msg['To']      = ', '.join(to_list)
-            msg.attach(MIMEText(body, 'plain'))
+            content = []
+            if body:
+                content.append({'type': 'text/plain', 'value': body})
+            if html_body:
+                content.append({'type': 'text/html', 'value': html_body})
+            if not content:
+                logger.error('No email body provided')
+                return
 
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                server.ehlo()
-                server.starttls()
-                server.login(self.username, self.app_password)
-                server.sendmail(self.username, to_list, msg.as_string())
-
-            logger.info(f'Notification sent → {to_list}: {subject}')
+            resp = requests.post(
+                'https://api.sendgrid.com/v3/mail/send',
+                headers={
+                    'Authorization': f'Bearer {sendgrid_api_key}',
+                    'Content-Type':  'application/json',
+                },
+                json={
+                    'personalizations': [{'to': [{'email': e} for e in to_list]}],
+                    'from':    {'email': self.username, 'name': 'NEPM Automation'},
+                    'subject': subject,
+                    'content': content,
+                },
+                timeout=15,
+            )
+            if resp.ok:
+                logger.info(f'Email sent via SendGrid → {to_list}: {subject}')
+            else:
+                logger.error(f'SendGrid error {resp.status_code}: {resp.text}')
         except Exception as e:
-            logger.error(f'Failed to send notification email: {e}')
+            logger.error(f'Failed to send email: {e}')
 
     def send_reply(self, to: str, subject: str, body: str,
                    in_reply_to: str = '', sendgrid_api_key: str = ''):
