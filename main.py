@@ -26,8 +26,10 @@ import config
 from clickup_client import ClickUpClient, STATUS_DEPOSIT_INVOICED, STATUS_FINAL_INVOICED
 from xero_client import XeroClient
 from gmail_client import GmailClient
-from email_parser import parse_job_email
+from email_parser import parse_job_email, parse_reply_email
 import notifier
+from daily_summary import send_daily_summary
+import pending_store
 
 # ------------------------------------------------------------------ #
 #  Logging                                                             #
@@ -116,6 +118,14 @@ def xero_info():
         return jsonify({'error': str(e)}), 500
 
 
+
+
+@app.route('/summary/send')
+def summary_send_manual():
+    """Manually trigger the daily summary email."""
+    import threading
+    threading.Thread(target=send_daily_summary, args=(xero, gmail, config.NOTIFICATION_EMAILS), daemon=True).start()
+    return jsonify({'status': 'summary sending'}), 200
 
 
 @app.route('/batch/invoices')
@@ -324,38 +334,52 @@ def handle_final_invoice(task_id: str):
         final_hrs    = total_hrs - deposit_hrs
         rate         = float(hourly_rate)
 
-        if final_hrs <= 0:
-            logger.error(
-                f'Task {task_id}: Final hours = {final_hrs:.2f} '
-                f'(total {total_hrs}hrs - deposit {deposit_hrs}hrs). Nothing to invoice.'
-            )
+        is_credit = final_hrs < 0
+        if final_hrs == 0:
+            logger.info(f'Task {task_id}: deposit exactly covers total — moving to Final Invoiced')
+            clickup.update_status(task_id, STATUS_FINAL_INVOICED)
             return
 
         job_name = task.get('name', 'Unknown Job')
 
-        description = (
-            f"Final Invoice \u2013 {job_name} \u2013 "
-            f"{final_hrs:.1f}hrs "
-            f"({total_hrs:.1f}hrs total less {deposit_hrs:.1f}hrs deposit)"
-        )
+        if is_credit:
+            credit_hrs  = abs(final_hrs)
+            description = (
+                f"Credit \u2013 {job_name} \u2013 "
+                f"{credit_hrs:.1f}hrs overpaid "
+                f"({total_hrs:.1f}hrs total, {deposit_hrs:.1f}hrs deposit already invoiced)"
+            )
+            qty = credit_hrs
+            ref = f'CU-{task_id}-credit'
+            doc_type = 'Credit note'
+        else:
+            description = (
+                f"Final Invoice \u2013 {job_name} \u2013 "
+                f"{final_hrs:.1f}hrs "
+                f"({total_hrs:.1f}hrs total less {deposit_hrs:.1f}hrs deposit)"
+            )
+            qty = final_hrs
+            ref = f'CU-{task_id}-final'
+            doc_type = 'Final invoice'
 
-        # --- Create invoice in Xero ---
+        # --- Create invoice or credit note in Xero ---
         contact_id = xero.get_contact_id(client_name)
         invoice    = xero.create_invoice(
             contact_id        = contact_id,
             line_items        = [{
                 'description':  description,
-                'quantity':     final_hrs,
+                'quantity':     qty,
                 'unit_amount':  rate,
                 'account_code': config.XERO_ACCOUNT_CODE,
             }],
             due_date          = date.today().strftime('%Y-%m-%d'),
             branding_theme_id = config.XERO_BRANDING_THEME_ID,
-            reference         = f'CU-{task_id}-final',
+            reference         = ref,
+            credit_note       = is_credit,
         )
 
-        inv_number = invoice.get('InvoiceNumber', '')
-        logger.info(f'Final invoice {inv_number} created (task {task_id}, {final_hrs:.1f}hrs @ ${rate:.2f}/hr)')
+        inv_number = invoice.get('InvoiceNumber', '') or invoice.get('CreditNoteNumber', '')
+        logger.info(f'{doc_type} {inv_number} created (task {task_id}, {qty:.1f}hrs @ ${rate:.2f}/hr)')
 
         # --- Update ClickUp ---
         clickup.set_field(task_id, 'Final Invoice #',      inv_number)
@@ -670,50 +694,94 @@ def batch_invoices():
                             logger.warning(f'Task {task_id}: missing hours/rate/estimate — skipping')
                             continue
                         final_hrs = total_hours - deposit_hrs
-                        if final_hrs <= 0:
-                            logger.warning(f'Task {task_id}: final hours {final_hrs:.2f} <= 0 — skipping')
-                            continue
-                        desc = (
-                            f"Final \u2013 {task_name} \u2013 "
-                            f"{final_hrs:.1f}hrs "
-                            f"({total_hours:.1f}hrs total less {deposit_hrs:.1f}hrs deposit)"
-                        )
-                        line_items.append({
-                            'description':  desc,
-                            'quantity':     final_hrs,
-                            'unit_amount':  hourly_rate,
-                            'account_code': config.XERO_ACCOUNT_CODE,
-                        })
-                        task_refs.append(f'CU-{task_id}-final')
-                        task_updates.append((task_id, 'final', STATUS_FINAL_INVOICED))
+                        if final_hrs < 0:
+                            # Client was overcharged on deposit — create a credit note
+                            credit_hrs = abs(final_hrs)
+                            desc = (
+                                f"Credit \u2013 {task_name} \u2013 "
+                                f"{credit_hrs:.1f}hrs overpaid "
+                                f"({total_hours:.1f}hrs total, {deposit_hrs:.1f}hrs deposit already invoiced)"
+                            )
+                            line_items.append({
+                                'description':  desc,
+                                'quantity':     credit_hrs,
+                                'unit_amount':  hourly_rate,
+                                'account_code': config.XERO_ACCOUNT_CODE,
+                                'credit_note':  True,
+                            })
+                            task_refs.append(f'CU-{task_id}-credit')
+                            task_updates.append((task_id, 'credit', STATUS_FINAL_INVOICED))
+                        elif final_hrs == 0:
+                            logger.info(f'Task {task_id}: deposit exactly covers total — no final invoice needed')
+                            clickup.update_status(task_id, STATUS_FINAL_INVOICED)
+                        else:
+                            desc = (
+                                f"Final \u2013 {task_name} \u2013 "
+                                f"{final_hrs:.1f}hrs "
+                                f"({total_hours:.1f}hrs total less {deposit_hrs:.1f}hrs deposit)"
+                            )
+                            line_items.append({
+                                'description':  desc,
+                                'quantity':     final_hrs,
+                                'unit_amount':  hourly_rate,
+                                'account_code': config.XERO_ACCOUNT_CODE,
+                                'credit_note':  False,
+                            })
+                            task_refs.append(f'CU-{task_id}-final')
+                            task_updates.append((task_id, 'final', STATUS_FINAL_INVOICED))
 
                 if not line_items:
                     logger.info(f'No valid line items for {client_name} — skipping')
                     continue
 
-                # Create one invoice for this client
+                # Split into regular line items and credit note line items
+                regular_items = [(i, r, u) for i, (r, u) in zip(
+                    [item for item in line_items if not item.get('credit_note')],
+                    [(ref, upd) for ref, upd in zip(task_refs, task_updates) if upd[1] != 'credit']
+                )] if False else None  # placeholder
+
+                regular_lines  = [i for i in line_items if not i.get('credit_note')]
+                credit_lines   = [i for i in line_items if i.get('credit_note')]
+                regular_refs   = [r for r, u in zip(task_refs, task_updates) if u[1] != 'credit']
+                credit_refs    = [r for r, u in zip(task_refs, task_updates) if u[1] == 'credit']
+                regular_updates = [u for u in task_updates if u[1] != 'credit']
+                credit_updates  = [u for u in task_updates if u[1] == 'credit']
+
                 contact_id = xero.get_contact_id(client_name)
-                invoice    = xero.create_invoice(
-                    contact_id        = contact_id,
-                    line_items        = line_items,
-                    due_date          = today,
-                    reference         = ','.join(task_refs),
-                    branding_theme_id = config.XERO_BRANDING_THEME_ID,
-                )
 
-                inv_number = invoice.get('InvoiceNumber', '')
-                logger.info(
-                    f'Batch invoice {inv_number} created for {client_name} '
-                    f'({len(line_items)} line item(s))'
-                )
+                def write_back(doc, updates, doc_type):
+                    doc_number = doc.get('InvoiceNumber', '') or doc.get('CreditNoteNumber', '')
+                    logger.info(f'Batch {doc_type} {doc_number} created for {client_name} ({len(updates)} item(s))')
+                    for task_id, inv_type, new_status in updates:
+                        inv_field    = 'Deposit Invoice #' if inv_type == 'deposit' else 'Final Invoice #'
+                        status_field = 'Deposit Invoice Status' if inv_type == 'deposit' else 'Final Invoice Status'
+                        clickup.set_field(task_id, inv_field,    doc_number)
+                        clickup.set_field(task_id, status_field, 'Invoiced')
+                        clickup.update_status(task_id, new_status)
 
-                # Write invoice number back to all tasks and update statuses
-                for task_id, inv_type, new_status in task_updates:
-                    inv_field    = 'Deposit Invoice #' if inv_type == 'deposit' else 'Final Invoice #'
-                    status_field = 'Deposit Invoice Status' if inv_type == 'deposit' else 'Final Invoice Status'
-                    clickup.set_field(task_id, inv_field,    inv_number)
-                    clickup.set_field(task_id, status_field, 'Invoiced')
-                    clickup.update_status(task_id, new_status)
+                # Create regular invoice if there are regular line items
+                if regular_lines:
+                    invoice = xero.create_invoice(
+                        contact_id        = contact_id,
+                        line_items        = regular_lines,
+                        due_date          = today,
+                        reference         = ','.join(regular_refs),
+                        branding_theme_id = config.XERO_BRANDING_THEME_ID,
+                        credit_note       = False,
+                    )
+                    write_back(invoice, regular_updates, 'invoice')
+
+                # Create credit note if there are credit line items
+                if credit_lines:
+                    credit_note = xero.create_invoice(
+                        contact_id        = contact_id,
+                        line_items        = credit_lines,
+                        due_date          = today,
+                        reference         = ','.join(credit_refs),
+                        branding_theme_id = config.XERO_BRANDING_THEME_ID,
+                        credit_note       = True,
+                    )
+                    write_back(credit_note, credit_updates, 'credit note')
 
             except Exception as e:
                 logger.error(f'Batch invoice error for client {client_name}: {e}')
@@ -730,8 +798,9 @@ sydney = pytz.timezone('Australia/Sydney')
 scheduler = BackgroundScheduler(timezone=sydney)
 scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
 scheduler.add_job(batch_invoices, 'cron', hour=15, minute=0, id='batch_invoices')
+scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS), 'cron', hour=17, minute=30, id='daily_summary')
 scheduler.start()
-logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm Sydney')
+logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm, daily summary at 5:30pm Sydney')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

@@ -78,8 +78,10 @@ class GmailClient:
 
         raw = data[0][1] if isinstance(data[0][1], bytes) else data[0][1]
         msg      = email.message_from_bytes(raw)
-        subject  = self._decode_str(msg.get('Subject', ''))
-        sender   = msg.get('From', '')
+        subject    = self._decode_str(msg.get('Subject', ''))
+        sender     = msg.get('From', '')
+        message_id = msg.get('Message-ID', msg.get('Message-Id', ''))
+        in_reply_to = msg.get('In-Reply-To', '')
         body     = ''
         attachments = []
 
@@ -114,6 +116,8 @@ class GmailClient:
             'sender':      sender,
             'body':        body,
             'attachments': attachments,
+            'message_id':  message_id,
+            'in_reply_to': in_reply_to,
         }
 
     def _decode_str(self, value: str) -> str:
@@ -173,3 +177,25 @@ class GmailClient:
             logger.info(f'Notification sent → {to_list}: {subject}')
         except Exception as e:
             logger.error(f'Failed to send notification email: {e}')
+
+    def send_reply(self, to: str, subject: str, body: str, in_reply_to: str = ''):
+        """Send a reply email with proper threading headers."""
+        try:
+            msg            = MIMEMultipart('alternative')
+            msg['Subject'] = subject if subject.lower().startswith('re:') else f'Re: {subject}'
+            msg['From']    = f'NEPM Automation <{self.username}>'
+            msg['To']      = to
+            if in_reply_to:
+                msg['In-Reply-To'] = in_reply_to
+                msg['References']  = in_reply_to
+            msg.attach(MIMEText(body, 'plain'))
+
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(self.username, self.app_password)
+                server.sendmail(self.username, [to], msg.as_string())
+
+            logger.info(f'Reply sent to {to}: {msg["Subject"]}')
+        except Exception as e:
+            logger.error(f'Failed to send reply: {e}')
