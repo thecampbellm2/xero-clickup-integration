@@ -158,12 +158,10 @@ class XeroClient:
         Each item in line_items is a dict:
           { description, quantity, unit_amount, account_code }
         """
-        invoice = {
-            'Type':      'ACCRECCREDIT' if credit_note else 'ACCREC',
+        doc = {
             'Status':    'DRAFT',
             'Contact':   {'ContactID': contact_id},
             'Reference': reference,
-            'DueDate':   due_date,
             'LineItems': [
                 {
                     'Description': item['description'],
@@ -175,17 +173,32 @@ class XeroClient:
             ],
         }
         if branding_theme_id:
-            invoice['BrandingThemeID'] = branding_theme_id
+            doc['BrandingThemeID'] = branding_theme_id
 
-        resp = requests.post(
-            f'{API_BASE}/Invoices',
-            headers=self._headers(),
-            json={'Invoices': [invoice]}
-        )
-        if not resp.ok:
-            logger.error(f'Xero invoice error {resp.status_code}: {resp.text}')
-        resp.raise_for_status()
-        return resp.json()['Invoices'][0]
+        if credit_note:
+            # Credit notes use a different endpoint and Date instead of DueDate
+            doc['Date'] = due_date
+            resp = requests.post(
+                f'{API_BASE}/CreditNotes',
+                headers=self._headers(),
+                json={'CreditNotes': [doc]}
+            )
+            if not resp.ok:
+                logger.error(f'Xero credit note error {resp.status_code}: {resp.text}')
+            resp.raise_for_status()
+            return resp.json()['CreditNotes'][0]
+        else:
+            doc['Type']    = 'ACCREC'
+            doc['DueDate'] = due_date
+            resp = requests.post(
+                f'{API_BASE}/Invoices',
+                headers=self._headers(),
+                json={'Invoices': [doc]}
+            )
+            if not resp.ok:
+                logger.error(f'Xero invoice error {resp.status_code}: {resp.text}')
+            resp.raise_for_status()
+            return resp.json()['Invoices'][0]
 
 
     def get_contact(self, contact_id: str) -> dict:
