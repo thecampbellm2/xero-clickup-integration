@@ -325,12 +325,17 @@ def handle_final_invoice(task_id: str):
         if not total_hours_invoiced:
             logger.error(f'Task {task_id}: "Total Hours Invoiced" is empty — cannot invoice')
             return
+        # If no estimate, check if a deposit was ever sent
         if not est_ms:
-            logger.error(f'Task {task_id}: Time estimate is 0 — cannot calculate balance')
-            return
-
-        est_hours    = float(est_ms) / 3_600_000
-        deposit_hrs  = est_hours / 2
+            deposit_invoice_num = fields.get('deposit_invoice_number') or ''
+            if deposit_invoice_num:
+                logger.error(f'Task {task_id}: deposit was sent but estimate is 0 — cannot calculate balance')
+                return
+            # No deposit sent — invoice for full amount
+            deposit_hrs = 0.0
+        else:
+            est_hours   = float(est_ms) / 3_600_000
+            deposit_hrs = est_hours / 2
         total_hrs    = float(total_hours_invoiced)
         final_hrs    = total_hrs - deposit_hrs
         rate         = float(hourly_rate)
@@ -691,9 +696,17 @@ def batch_invoices():
                             logger.info(f'Task {task_id} already has final invoice — skipping')
                             continue
                         total_hours = float(fields.get('total_hours_invoiced') or 0)
-                        if not total_hours or not hourly_rate or not est_ms:
-                            logger.warning(f'Task {task_id}: missing hours/rate/estimate — skipping')
+                        if not total_hours or not hourly_rate:
+                            logger.warning(f'Task {task_id}: missing total hours or rate — skipping')
                             continue
+                        # If no estimate set, check whether a deposit was ever sent
+                        if not est_ms:
+                            deposit_invoice_num = fields.get('deposit_invoice_number') or ''
+                            if deposit_invoice_num:
+                                logger.warning(f'Task {task_id}: deposit was sent but estimate is 0 — skipping')
+                                continue
+                            # No deposit sent — invoice for full amount
+                            deposit_hrs = 0.0
                         final_hrs = total_hours - deposit_hrs
                         if final_hrs < 0:
                             # Client was overcharged on deposit — create a credit note
