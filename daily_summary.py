@@ -223,13 +223,9 @@ def build_html(summary: dict, today_str: str) -> str:
 </html>'''
 
 
-def send_daily_summary(xero, gmail, recipients: list):
-    """Build and send the daily summary email."""
+def send_daily_summary(xero, gmail, recipients: list, sendgrid_api_key: str = ''):
+    """Build and send the daily summary email via SendGrid."""
     try:
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        import smtplib
-
         today_str = date.today().strftime('%A, %d %B %Y')
         summary   = build_summary(xero)
         html      = build_html(summary, today_str)
@@ -239,21 +235,16 @@ def send_daily_summary(xero, gmail, recipients: list):
             f"{len(summary['finals'])} final{'s' if len(summary['finals'])!=1 else ''}"
             if summary['has_activity'] else 'No activity'
         )
-        subject = f"NEPM Daily Summary — {today_str} — {activity}"
+        subject = f"NEPM Daily Summary \u2014 {today_str} \u2014 {activity}"
 
-        msg            = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From']    = f'NEPM Automation <{gmail.username}>'
-        msg['To']      = ', '.join(recipients)
-        msg.attach(MIMEText(html, 'html'))
-
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(gmail.username, gmail.app_password)
-            server.sendmail(gmail.username, recipients, msg.as_string())
-
-        logger.info(f'Daily summary sent → {recipients} ({activity})')
+        gmail.send_email(
+            to_list          = recipients,
+            subject          = subject,
+            body             = f"NEPM Daily Summary\n{today_str}\n{activity}",
+            html_body        = html,
+            sendgrid_api_key = sendgrid_api_key,
+        )
+        logger.info(f'Daily summary sent \u2192 {recipients} ({activity})')
 
     except Exception as e:
         logger.error(f'Failed to send daily summary: {e}')

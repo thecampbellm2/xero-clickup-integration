@@ -33,3 +33,6 @@ TOKEN_GIST_ID = os.environ.get('TOKEN_GIST_ID', '')
 
 # Error notifications
 NOTIFICATION_EMAILS = [e.strip() for e in os.environ.get('NOTIFICATION_EMAILS', 'mike@nationalestimation.com.au,georgina@nationalestimation.com.au').split(',')]
+
+# SendGrid (transactional email via HTTP — avoids Render SMTP port blocking)
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')

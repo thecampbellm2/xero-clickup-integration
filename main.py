@@ -291,7 +291,7 @@ def handle_deposit_invoice(task_id: str):
 
     except Exception as e:
         logger.error(f'handle_deposit_invoice failed for task {task_id}: {e}')
-        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'deposit')
+        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'deposit')
 
 
 def handle_final_invoice(task_id: str):
@@ -394,7 +394,7 @@ def handle_final_invoice(task_id: str):
 
     except Exception as e:
         logger.error(f'handle_final_invoice failed for task {task_id}: {e}')
-        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'final')
+        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'final')
 
 
 def handle_payment(invoice_id: str):
@@ -455,16 +455,57 @@ def handle_new_contact(contact_id: str):
 
         added = clickup.add_client_option(name)
         if not added:
-            notifier.new_contact_action_required(gmail, config.NOTIFICATION_EMAILS, name)
+            notifier.new_contact_action_required(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, name)
 
     except Exception as e:
         logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
 
 
 
+REQUIRED_FIELDS = {
+    'client':          'Client name',
+    'hourly_rate':     'Hourly rate (e.g. $120/hr)',
+    'estimated_hours': 'Estimated hours (e.g. 6 hours)',
+}
+
+
+def build_question_email(job_title: str, missing: list) -> str:
+    lines = '\n'.join(f'  \u2022 {REQUIRED_FIELDS[f]}' for f in missing)
+    return f"""Hi George,
+
+A job email came through but is missing some required details needed to create a deposit invoice:
+
+\U0001f4cb Job: {job_title}
+
+Missing details:
+{lines}
+
+Please reply with the missing information in plain English, for example:
+"Client is BR Masonry, rate is $120/hr, estimated 6 hours"
+
+If you don\u2019t have these details yet, just reply with something like:
+"Import as is" or "Don\u2019t know yet" \u2014 the job will be added to ClickUp with the information available.
+
+The job will be automatically imported after 3 hours if no reply is received.
+
+\u2014 NEPM Automation"""
+
+
+def _missing_fields(client_name, hourly_rate, estimated_hours) -> list:
+    missing = []
+    if not client_name:
+        missing.append('client')
+    if not hourly_rate:
+        missing.append('hourly_rate')
+    if not estimated_hours:
+        missing.append('estimated_hours')
+    return missing
+
+
 def process_job_emails():
     """
     Poll Gmail for unprocessed emails from George and create ClickUp tasks.
+    Also processes replies to pending-field questions and checks for timeouts.
     Runs automatically every 3 minutes via the scheduler.
     """
     if not gmail.is_authenticated():
@@ -472,19 +513,86 @@ def process_job_emails():
         return
 
     try:
+        # ── Check for expired pending jobs (3-hour timeout) ───────────
+        expired = pending_store.get_expired(config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
+        for mid, job in expired:
+            logger.warning(f'Pending job timed out — importing as-is: {job.get("job_title")}')
+            create_job_task(
+                name             = job.get('job_title', 'Unknown Job'),
+                client_name      = job.get('client', ''),
+                hourly_rate      = job.get('hourly_rate'),
+                time_estimate_ms = int(job['estimated_hours'] * 3_600_000) if job.get('estimated_hours') else None,
+                description      = job.get('body', ''),
+                attachments      = [],
+                message_id       = '',
+            )
+            notifier.email_parse_failed(
+                gmail, config.NOTIFICATION_EMAILS, job.get('subject', ''),
+                f'Job imported after 3-hour timeout — missing fields: {", ".join(job.get("missing_fields", []))}'            )
+            pending_store.remove(config.GITHUB_TOKEN, config.TOKEN_GIST_ID, mid)
+
+        # ── Fetch unread emails ───────────────────────────────────────
         emails = gmail.get_unprocessed_emails()
         if not emails:
             return
 
         logger.info(f'Processing {len(emails)} new job email(s)')
 
+        # Load pending jobs to detect replies
+        all_pending    = pending_store.get_all(config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
+        pending_by_mid = {job['original_message_id']: (mid, job)
+                          for mid, job in all_pending.items()
+                          if 'original_message_id' in job}
+
         # Get current Client dropdown options for fuzzy matching
-        client_field  = clickup._fields.get('client', {})
+        client_field   = clickup._fields.get('client', {})
         client_options = [o['name'] for o in client_field.get('type_config', {}).get('options', [])]
 
         for email in emails:
             try:
-                # Parse with Claude
+                in_reply_to = email.get('in_reply_to', '').strip()
+
+                # ── Is this a reply to a pending job question? ────────
+                if in_reply_to and in_reply_to in pending_by_mid:
+                    mid, pending_job = pending_by_mid[in_reply_to]
+                    logger.info(f'Reply received for pending job: {pending_job.get("job_title")}')
+
+                    reply_data = parse_reply_email(
+                        reply_body     = email['body'] or '',
+                        missing_fields = pending_job.get('missing_fields', []),
+                        api_key        = config.ANTHROPIC_API_KEY,
+                    )
+
+                    if reply_data.get('import_as_is'):
+                        client_name     = pending_job.get('client', '')
+                        hourly_rate     = pending_job.get('hourly_rate')
+                        estimated_hours = pending_job.get('estimated_hours')
+                    else:
+                        client_name     = (reply_data.get('client') or pending_job.get('client') or '').strip()
+                        hourly_rate     = reply_data.get('hourly_rate') or pending_job.get('hourly_rate')
+                        estimated_hours = reply_data.get('estimated_hours') or pending_job.get('estimated_hours')
+                        if not client_name and client_options:
+                            import difflib
+                            matches = difflib.get_close_matches(
+                                email['body'] or '', client_options, n=1, cutoff=0.3
+                            )
+                            if matches:
+                                client_name = matches[0]
+
+                    create_job_task(
+                        name             = pending_job.get('job_title', 'Unknown Job'),
+                        client_name      = client_name,
+                        hourly_rate      = hourly_rate,
+                        time_estimate_ms = int(estimated_hours * 3_600_000) if estimated_hours else None,
+                        description      = pending_job.get('body', ''),
+                        attachments      = [],
+                        message_id       = '',
+                    )
+                    pending_store.remove(config.GITHUB_TOKEN, config.TOKEN_GIST_ID, mid)
+                    gmail.mark_processed(email['id'])
+                    continue
+
+                # ── New job email ─────────────────────────────────────
                 data = parse_job_email(
                     subject        = email['subject'],
                     body           = email['body'],
@@ -494,37 +602,61 @@ def process_job_emails():
 
                 if not data:
                     logger.error(f'Could not parse email {email["id"]} — skipping')
-                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, email['subject'], 'Claude API could not extract job details')
+                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, email['subject'], 'Claude API could not extract job details')
                     gmail.mark_processed(email['id'])
                     continue
 
-                job_title       = data.get('job_title', '').strip() or email['subject']
-                client_name     = data.get('client', '').strip()
+                job_title       = (data.get('job_title') or '').strip() or email['subject']
+                client_name     = (data.get('client') or '').strip()
                 estimated_hours = data.get('estimated_hours')
                 hourly_rate     = data.get('hourly_rate')
 
-                # Fuzzy fallback: if Claude returned no client, try Python difflib
+                # Fuzzy fallback for client
                 if not client_name and client_options:
                     import difflib
                     matches = difflib.get_close_matches(
                         email['subject'] + ' ' + (email['body'] or ''),
-                        client_options,
-                        n=1,
-                        cutoff=0.3
+                        client_options, n=1, cutoff=0.3
                     )
                     if matches:
                         client_name = matches[0]
-                        logger.info(f'Fuzzy matched client "{client_name}" from email text')
+                        logger.info(f'Fuzzy matched client "{client_name}"')
 
-                if not client_name:
-                    logger.warning(f'No client match for email "{email["subject"]}" — task will have blank Client field')
-                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, email['subject'], 'Could not match client name to any known client in ClickUp dropdown')
+                missing = _missing_fields(client_name, hourly_rate, estimated_hours)
 
-                # Convert hours to milliseconds for ClickUp time estimate
+                if missing:
+                    # Send automated question to George and queue the job
+                    sender   = email['sender']
+                    question = build_question_email(job_title, missing)
+                    gmail.send_reply(
+                        to               = sender,
+                        subject          = email['subject'],
+                        body             = question,
+                        in_reply_to      = email.get('message_id', ''),
+                        sendgrid_api_key = config.SENDGRID_API_KEY,
+                    )
+                    pending_store.add(
+                        config.GITHUB_TOKEN, config.TOKEN_GIST_ID,
+                        email['id'],
+                        {
+                            'job_title':           job_title,
+                            'client':              client_name,
+                            'hourly_rate':         hourly_rate,
+                            'estimated_hours':     estimated_hours,
+                            'missing_fields':      missing,
+                            'subject':             email['subject'],
+                            'body':                email['body'],
+                            'sender':              sender,
+                            'original_message_id': email.get('message_id', ''),
+                        }
+                    )
+                    logger.info(f'Question sent for "{job_title}" — missing: {missing}')
+                    gmail.mark_processed(email['id'])
+                    continue
+
+                # All fields present — create task
                 est_ms = int(estimated_hours * 3_600_000) if estimated_hours else None
-
-                # Create the ClickUp task
-                task = create_job_task(
+                task   = create_job_task(
                     name             = job_title,
                     client_name      = client_name,
                     hourly_rate      = hourly_rate,
@@ -533,16 +665,13 @@ def process_job_emails():
                     attachments      = email.get('attachments', []),
                     message_id       = email['id'],
                 )
-
                 if task:
-                    logger.info(f'Created task "{job_title}" (client: {client_name or "blank"})')
-
-                # Mark email as processed regardless of task creation outcome
+                    logger.info(f'Created task "{job_title}" (client: {client_name})')
                 gmail.mark_processed(email['id'])
 
             except Exception as e:
                 logger.error(f'Failed to process email {email["id"]}: {e}')
-                gmail.mark_processed(email['id'])   # mark processed to avoid infinite retry
+                gmail.mark_processed(email['id'])
 
     except Exception as e:
         logger.error(f'process_job_emails error: {e}')
@@ -799,7 +928,7 @@ def batch_invoices():
 
             except Exception as e:
                 logger.error(f'Batch invoice error for client {client_name}: {e}')
-                notifier.batch_failed(gmail, config.NOTIFICATION_EMAILS, client_name, str(e))
+                notifier.batch_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, client_name, str(e))
 
     except Exception as e:
         logger.error(f'batch_invoices failed: {e}')
@@ -812,7 +941,7 @@ sydney = pytz.timezone('Australia/Sydney')
 scheduler = BackgroundScheduler(timezone=sydney)
 scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
 scheduler.add_job(batch_invoices, 'cron', hour=15, minute=0, id='batch_invoices')
-scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS), 'cron', hour=17, minute=30, id='daily_summary')
+scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY), 'cron', hour=17, minute=30, id='daily_summary')
 scheduler.start()
 logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm, daily summary at 5:30pm Sydney')
 

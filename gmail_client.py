@@ -178,24 +178,13 @@ class GmailClient:
         except Exception as e:
             logger.error(f'Failed to send notification email: {e}')
 
-    def send_reply(self, to: str, subject: str, body: str, in_reply_to: str = ''):
-        """Send a reply email with proper threading headers."""
-        try:
-            msg            = MIMEMultipart('alternative')
-            msg['Subject'] = subject if subject.lower().startswith('re:') else f'Re: {subject}'
-            msg['From']    = f'NEPM Automation <{self.username}>'
-            msg['To']      = to
-            if in_reply_to:
-                msg['In-Reply-To'] = in_reply_to
-                msg['References']  = in_reply_to
-            msg.attach(MIMEText(body, 'plain'))
-
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                server.ehlo()
-                server.starttls()
-                server.login(self.username, self.app_password)
-                server.sendmail(self.username, [to], msg.as_string())
-
-            logger.info(f'Reply sent to {to}: {msg["Subject"]}')
-        except Exception as e:
-            logger.error(f'Failed to send reply: {e}')
+    def send_reply(self, to: str, subject: str, body: str,
+                   in_reply_to: str = '', sendgrid_api_key: str = ''):
+        """Send a reply email via SendGrid HTTP API."""
+        reply_subject = subject if subject.lower().startswith('re:') else f'Re: {subject}'
+        self.send_email(
+            to_list           = [to],
+            subject           = reply_subject,
+            body              = body,
+            sendgrid_api_key  = sendgrid_api_key,
+        )
