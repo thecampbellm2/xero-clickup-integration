@@ -130,9 +130,10 @@ def summary_send_manual():
 
 @app.route('/batch/invoices')
 def batch_invoices_manual():
-    """Manually trigger the batch invoice run — useful for testing or urgent batches."""
-    batch_invoices()
-    return jsonify({'status': 'done'}), 200
+    """Manually trigger the batch invoice run — runs in background to avoid timeout."""
+    import threading
+    threading.Thread(target=batch_invoices, daemon=True).start()
+    return jsonify({'status': 'batch started'}), 200
 
 
 @app.route('/gmail/process')

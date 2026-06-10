@@ -176,7 +176,8 @@ class XeroClient:
             doc['BrandingThemeID'] = branding_theme_id
 
         if credit_note:
-            # Credit notes use a different endpoint and Date instead of DueDate
+            # Credit notes use a different endpoint, need Type set, and use Date instead of DueDate
+            doc['Type'] = 'ACCRECCREDIT'
             doc['Date'] = due_date
             resp = requests.post(
                 f'{API_BASE}/CreditNotes',
