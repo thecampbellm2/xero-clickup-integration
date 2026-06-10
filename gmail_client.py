@@ -3,6 +3,7 @@ Gmail client using IMAP/SMTP with an App Password.
 No OAuth required — App Passwords don't expire unless explicitly revoked.
 """
 import imaplib
+import requests
 import smtplib
 import email
 import logging
