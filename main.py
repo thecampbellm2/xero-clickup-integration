@@ -124,7 +124,7 @@ def xero_info():
 def summary_send_manual():
     """Manually trigger the daily summary email."""
     import threading
-    threading.Thread(target=send_daily_summary, args=(xero, gmail, config.NOTIFICATION_EMAILS), daemon=True).start()
+    threading.Thread(target=send_daily_summary, args=(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY), daemon=True).start()
     return jsonify({'status': 'summary sending'}), 200
 
 
