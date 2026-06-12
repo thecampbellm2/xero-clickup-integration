@@ -6,18 +6,41 @@ import logging
 import traceback
 from datetime import datetime
 import pytz
+import requests as _requests
 
 logger = logging.getLogger(__name__)
 
 SYDNEY = pytz.timezone('Australia/Sydney')
+
+CLICKUP_WORKSPACE_ID = '90161537078'
+CLICKUP_BASE         = 'https://api.clickup.com/api/v3'
 
 
 def _now() -> str:
     return datetime.now(SYDNEY).strftime('%d %b %Y %I:%M %p')
 
 
-def _send(gmail, recipients, subject, body, sendgrid_api_key=''):
-    """Send notification — fails silently so it never breaks the main flow."""
+def _clickup_dm(api_token: str, channel_id: str, message: str):
+    """Post a plain-text alert to a ClickUp DM channel. Fails silently."""
+    if not api_token or not channel_id:
+        return
+    try:
+        _requests.post(
+            f'{CLICKUP_BASE}/workspaces/{CLICKUP_WORKSPACE_ID}/chat/channels/{channel_id}/messages',
+            headers={
+                'Authorization': api_token,
+                'Content-Type':  'application/json',
+            },
+            json={'content': message, 'content_format': 'text/plain'},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f'ClickUp DM notification failed: {e}')
+
+
+def _send(gmail, recipients, subject, body, sendgrid_api_key='', clickup_token='', clickup_channel=''):
+    """Send notification via SendGrid email AND ClickUp DM — both fire independently."""
+    # SendGrid email
     try:
         gmail.send_email(
             to_list          = recipients,
@@ -28,10 +51,15 @@ def _send(gmail, recipients, subject, body, sendgrid_api_key=''):
     except Exception as e:
         logger.error(f'Could not send notification email: {e}')
 
+    # ClickUp DM (secondary channel — fires regardless of email outcome)
+    if clickup_token and clickup_channel:
+        dm_text = f'[NEPM Automation] {subject}\n\n{body}'
+        _clickup_dm(clickup_token, clickup_channel, dm_text)
+
 
 # ── Notification functions ────────────────────────────────────────────────────
 
-def invoice_failed(gmail, recipients, task_id, job_name, client, error, invoice_type='deposit', sendgrid_api_key=''):
+def invoice_failed(gmail, recipients, task_id, job_name, client, error, invoice_type='deposit', sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = f'⚠️ {invoice_type.title()} invoice failed — {job_name}'
     body = f"""An error occurred while creating a {invoice_type} invoice.
 
@@ -45,10 +73,10 @@ Action required:
 The task is still sitting at its current status in ClickUp. Once the issue is resolved, move it to "Send {invoice_type.title()} Invoice" to retry.
 
 — NEPM Automation"""
-    _send(gmail, recipients, subject, body, sendgrid_api_key)
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
-def batch_failed(gmail, recipients, client, error, sendgrid_api_key=''):
+def batch_failed(gmail, recipients, client, error, sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = f'⚠️ Batch invoice failed — {client}'
     body = f"""The 3pm batch invoice run encountered an error for a client.
 
@@ -60,10 +88,10 @@ Action required:
 Check ClickUp for jobs belonging to {client} that are still sitting at "Invoice Pending" or "Final Invoice Pending". Once the issue is resolved, hit /batch/invoices to retry.
 
 — NEPM Automation"""
-    _send(gmail, recipients, subject, body, sendgrid_api_key)
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
-def email_parse_failed(gmail, recipients, email_subject, error, sendgrid_api_key=''):
+def email_parse_failed(gmail, recipients, email_subject, error, sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = f'⚠️ Job email could not be processed — {email_subject[:50]}'
     body = f"""An email arrived but could not be processed into a ClickUp task.
 
@@ -75,10 +103,10 @@ Action required:
 Log into nepmclickup@gmail.com, find this email, and create the ClickUp task manually. The email has been marked as processed so it won't be retried automatically.
 
 — NEPM Automation"""
-    _send(gmail, recipients, subject, body, sendgrid_api_key)
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
-def new_contact_action_required(gmail, recipients, contact_name, sendgrid_api_key=''):
+def new_contact_action_required(gmail, recipients, contact_name, sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = f'ℹ️ New Xero contact — add to ClickUp dropdown: {contact_name}'
     body = f"""A new contact was created in Xero and needs to be manually added to the Client dropdown in ClickUp.
 
@@ -90,10 +118,10 @@ In ClickUp, go to the Jobs list → Custom Fields → Client → Add option: "{c
 Make sure the name matches Xero exactly.
 
 — NEPM Automation"""
-    _send(gmail, recipients, subject, body, sendgrid_api_key)
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
-def xero_auth_failed(gmail, recipients):
+def xero_auth_failed(gmail, recipients, sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = '⚠️ Xero authentication error — re-auth required'
     body = f"""The automation could not connect to Xero. The access token may have expired or been revoked.
 
@@ -103,7 +131,7 @@ Action required:
 Visit https://xero-clickup-integration.onrender.com/xero/auth in your browser to re-authenticate.
 
 — NEPM Automation"""
-    _send(gmail, recipients, subject, body, sendgrid_api_key)
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
 def gmail_auth_failed(recipients):

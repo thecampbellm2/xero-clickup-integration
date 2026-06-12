@@ -291,7 +291,7 @@ def handle_deposit_invoice(task_id: str):
 
     except Exception as e:
         logger.error(f'handle_deposit_invoice failed for task {task_id}: {e}')
-        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'deposit')
+        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'deposit', sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
 
 
 def handle_final_invoice(task_id: str):
@@ -394,7 +394,7 @@ def handle_final_invoice(task_id: str):
 
     except Exception as e:
         logger.error(f'handle_final_invoice failed for task {task_id}: {e}')
-        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'final')
+        notifier.invoice_failed(gmail, config.NOTIFICATION_EMAILS, task_id, task.get('name','Unknown') if 'task' in dir() else 'Unknown', '', str(e), 'final', sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
 
 
 def handle_payment(invoice_id: str):
@@ -455,7 +455,7 @@ def handle_new_contact(contact_id: str):
 
         added = clickup.add_client_option(name)
         if not added:
-            notifier.new_contact_action_required(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, name)
+            notifier.new_contact_action_required(gmail, config.NOTIFICATION_EMAILS, name, sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
 
     except Exception as e:
         logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
@@ -522,13 +522,18 @@ def process_job_emails():
                 client_name      = job.get('client', ''),
                 hourly_rate      = job.get('hourly_rate'),
                 time_estimate_ms = int(job['estimated_hours'] * 3_600_000) if job.get('estimated_hours') else None,
+                due_date         = job.get('due_date'),
                 description      = job.get('body', ''),
                 attachments      = [],
                 message_id       = '',
             )
             notifier.email_parse_failed(
                 gmail, config.NOTIFICATION_EMAILS, job.get('subject', ''),
-                f'Job imported after 3-hour timeout — missing fields: {", ".join(job.get("missing_fields", []))}'            )
+                f'Job imported after 3-hour timeout — missing fields: {", ".join(job.get("missing_fields", []))}',
+                sendgrid_api_key=config.SENDGRID_API_KEY,
+                clickup_token=config.CLICKUP_API_TOKEN,
+                clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID,
+            )
             pending_store.remove(config.GITHUB_TOKEN, config.TOKEN_GIST_ID, mid)
 
         # ── Fetch unread emails ───────────────────────────────────────
@@ -584,6 +589,7 @@ def process_job_emails():
                         client_name      = client_name,
                         hourly_rate      = hourly_rate,
                         time_estimate_ms = int(estimated_hours * 3_600_000) if estimated_hours else None,
+                        due_date         = pending_job.get('due_date'),
                         description      = pending_job.get('body', ''),
                         attachments      = [],
                         message_id       = '',
@@ -602,7 +608,7 @@ def process_job_emails():
 
                 if not data:
                     logger.error(f'Could not parse email {email["id"]} — skipping')
-                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, email['subject'], 'Claude API could not extract job details')
+                    notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, email['subject'], 'Claude API could not extract job details', sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
                     gmail.mark_processed(email['id'])
                     continue
 
@@ -610,6 +616,7 @@ def process_job_emails():
                 client_name     = (data.get('client') or '').strip()
                 estimated_hours = data.get('estimated_hours')
                 hourly_rate     = data.get('hourly_rate')
+                due_date        = data.get('due_date') or None
 
                 # Fuzzy fallback for client
                 if not client_name and client_options:
@@ -625,11 +632,14 @@ def process_job_emails():
                 missing = _missing_fields(client_name, hourly_rate, estimated_hours)
 
                 if missing:
-                    # Send automated question to George and queue the job
+                    # Send automated question to George's primary NEPM address.
+                    # We deliberately do NOT reply to email['sender'] because George often
+                    # forwards jobs from a client address (e.g. georgina@brmasonry.com.au)
+                    # — replying there means she never sees the question.
                     sender   = email['sender']
                     question = build_question_email(job_title, missing)
                     gmail.send_reply(
-                        to               = sender,
+                        to               = config.GEORGE_EMAIL,
                         subject          = email['subject'],
                         body             = question,
                         in_reply_to      = email.get('message_id', ''),
@@ -643,6 +653,7 @@ def process_job_emails():
                             'client':              client_name,
                             'hourly_rate':         hourly_rate,
                             'estimated_hours':     estimated_hours,
+                            'due_date':            due_date,
                             'missing_fields':      missing,
                             'subject':             email['subject'],
                             'body':                email['body'],
@@ -661,6 +672,7 @@ def process_job_emails():
                     client_name      = client_name,
                     hourly_rate      = hourly_rate,
                     time_estimate_ms = est_ms,
+                    due_date         = due_date,
                     description      = email['body'],
                     attachments      = email.get('attachments', []),
                     message_id       = email['id'],
@@ -678,7 +690,7 @@ def process_job_emails():
 
 
 def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
-                    description: str = '', attachments: list = None, message_id: str = '') -> dict:
+                    due_date: str = None, description: str = '', attachments: list = None, message_id: str = '') -> dict:
     """Create a ClickUp task in the Jobs list with pre-filled fields, description and attachments."""
     try:
         task_data = {
@@ -689,6 +701,13 @@ def create_job_task(name: str, client_name: str, hourly_rate, time_estimate_ms,
             task_data['time_estimate'] = time_estimate_ms
         if description:
             task_data['markdown_description'] = description.strip()
+        if due_date:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.strptime(due_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                task_data['due_date'] = int(dt.timestamp() * 1000)
+            except ValueError:
+                logger.warning(f'Could not parse due_date "{due_date}" — skipping')
 
         resp = requests.post(
             f'https://api.clickup.com/api/v2/list/{config.CLICKUP_LIST_ID}/task',
@@ -928,7 +947,7 @@ def batch_invoices():
 
             except Exception as e:
                 logger.error(f'Batch invoice error for client {client_name}: {e}')
-                notifier.batch_failed(gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, client_name, str(e))
+                notifier.batch_failed(gmail, config.NOTIFICATION_EMAILS, client_name, str(e), sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
 
     except Exception as e:
         logger.error(f'batch_invoices failed: {e}')

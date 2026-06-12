@@ -34,5 +34,13 @@ TOKEN_GIST_ID = os.environ.get('TOKEN_GIST_ID', '')
 # Error notifications
 NOTIFICATION_EMAILS = [e.strip() for e in os.environ.get('NOTIFICATION_EMAILS', 'mike@nationalestimation.com.au,georgina@nationalestimation.com.au').split(',')]
 
+# George's primary address — used for missing-field questions so replies always go to the right inbox
+# regardless of what address she forwarded a job email from
+GEORGE_EMAIL = os.environ.get('GEORGE_EMAIL', 'georgina@nationalestimation.com.au')
+
 # SendGrid (transactional email via HTTP — avoids Render SMTP port blocking)
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
+
+# ClickUp alert channel — DM channel used for automation error notifications
+# Discovered channel ID: Mike & George DM (2kz0qr1p-296)
+CLICKUP_ALERT_CHANNEL_ID = os.environ.get('CLICKUP_ALERT_CHANNEL_ID', '2kz0qr1p-296')
