@@ -19,6 +19,11 @@ CONNECTIONS_URL = 'https://api.xero.com/connections'
 API_BASE        = 'https://api.xero.com/api.xro/2.0'
 TOKEN_FILE      = 'xero_tokens.json'
 
+
+class XeroAuthError(Exception):
+    """Raised when Xero token refresh fails — signals that re-auth is required."""
+    pass
+
 SCOPES = ' '.join([
     'accounting.invoices',      # create/read invoices
     'accounting.contacts',      # read/write contacts
@@ -89,7 +94,7 @@ class XeroClient:
 
     def _get_access_token(self) -> str:
         if not self._tokens:
-            raise Exception('Xero not authenticated. Visit /xero/auth to connect.')
+            raise XeroAuthError('Xero not authenticated. Visit /xero/auth to connect.')
 
         # Refresh if expired (or close to it)
         if time.time() >= self._tokens.get('expires_at', 0):
@@ -98,6 +103,15 @@ class XeroClient:
                 'grant_type':    'refresh_token',
                 'refresh_token': self._tokens['refresh_token'],
             }, auth=(self.client_id, self.client_secret))
+
+            if resp.status_code in (400, 401):
+                # Log the full Xero error body so we can see exactly what went wrong
+                logger.error(f'Xero token refresh failed ({resp.status_code}): {resp.text}')
+                raise XeroAuthError(
+                    f'Xero refresh token rejected ({resp.status_code}) — re-auth required. '
+                    f'Visit /xero/auth to reconnect. Xero said: {resp.text[:200]}'
+                )
+
             resp.raise_for_status()
             new = resp.json()
             new['expires_at'] = time.time() + new.get('expires_in', 1800) - 60

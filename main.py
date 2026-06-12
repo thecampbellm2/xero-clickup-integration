@@ -124,7 +124,7 @@ def xero_info():
 def summary_send_manual():
     """Manually trigger the daily summary email."""
     import threading
-    threading.Thread(target=send_daily_summary, args=(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY), daemon=True).start()
+    threading.Thread(target=send_daily_summary, args=(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY), kwargs={'clickup_token': config.CLICKUP_API_TOKEN, 'clickup_channel': config.CLICKUP_ALERT_CHANNEL_ID}, daemon=True).start()
     return jsonify({'status': 'summary sending'}), 200
 
 
@@ -960,7 +960,7 @@ sydney = pytz.timezone('Australia/Sydney')
 scheduler = BackgroundScheduler(timezone=sydney)
 scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
 scheduler.add_job(batch_invoices, 'cron', hour=15, minute=0, id='batch_invoices')
-scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY), 'cron', hour=17, minute=30, id='daily_summary')
+scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', hour=17, minute=30, id='daily_summary')
 scheduler.start()
 logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm, daily summary at 5:30pm Sydney')
 

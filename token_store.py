@@ -100,7 +100,11 @@ def save_tokens(token_file: str, gist_key: str, tokens: dict, github_token: str,
         logger.info(f'Saved {gist_key} tokens to GitHub Gist')
 
     except Exception as e:
-        logger.error(f'Could not save {gist_key} tokens to Gist: {e}')
+        logger.error(
+            f'CRITICAL: Could not save {gist_key} tokens to Gist — '
+            f'tokens are only in the local file. If Render restarts, auth will break. '
+            f'Check GITHUB_TOKEN is valid and has Gist write access. Error: {e}'
+        )
 
 
 def _write_file(path: str, data: dict):

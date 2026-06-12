@@ -223,8 +223,12 @@ def build_html(summary: dict, today_str: str) -> str:
 </html>'''
 
 
-def send_daily_summary(xero, gmail, recipients: list, sendgrid_api_key: str = ''):
+def send_daily_summary(xero, gmail, recipients: list, sendgrid_api_key: str = '',
+                       clickup_token: str = '', clickup_channel: str = ''):
     """Build and send the daily summary email via SendGrid."""
+    from xero_client import XeroAuthError
+    import notifier
+
     try:
         today_str = date.today().strftime('%A, %d %B %Y')
         summary   = build_summary(xero)
@@ -245,6 +249,15 @@ def send_daily_summary(xero, gmail, recipients: list, sendgrid_api_key: str = ''
             sendgrid_api_key = sendgrid_api_key,
         )
         logger.info(f'Daily summary sent \u2192 {recipients} ({activity})')
+
+    except XeroAuthError as e:
+        logger.error(f'Daily summary failed — Xero auth error: {e}')
+        notifier.xero_auth_failed(
+            gmail, recipients,
+            sendgrid_api_key=sendgrid_api_key,
+            clickup_token=clickup_token,
+            clickup_channel=clickup_channel,
+        )
 
     except Exception as e:
         logger.error(f'Failed to send daily summary: {e}')
