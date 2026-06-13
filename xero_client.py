@@ -6,6 +6,7 @@ import hashlib
 import base64
 import logging
 import secrets
+import threading
 import time
 from urllib.parse import urlencode
 
@@ -38,6 +39,7 @@ class XeroClient:
         self.client_secret = client_secret
         self.redirect_uri  = redirect_uri
         self.webhook_key   = webhook_key
+        self._refresh_lock = threading.Lock()   # prevents concurrent token refreshes
         self._tokens       = self._load_tokens()
 
     # ------------------------------------------------------------------ #
@@ -96,28 +98,32 @@ class XeroClient:
         if not self._tokens:
             raise XeroAuthError('Xero not authenticated. Visit /xero/auth to connect.')
 
-        # Refresh if expired (or close to it)
+        # Refresh if expired (or close to it).
+        # Lock ensures only one thread refreshes at a time — concurrent callers
+        # wait, then find the token already fresh and skip the refresh entirely.
         if time.time() >= self._tokens.get('expires_at', 0):
-            logger.info('Access token expired — refreshing')
-            resp = requests.post(TOKEN_URL, data={
-                'grant_type':    'refresh_token',
-                'refresh_token': self._tokens['refresh_token'],
-            }, auth=(self.client_id, self.client_secret))
+            with self._refresh_lock:
+                # Re-check inside the lock — another thread may have already refreshed
+                if time.time() >= self._tokens.get('expires_at', 0):
+                    logger.info('Access token expired — refreshing')
+                    resp = requests.post(TOKEN_URL, data={
+                        'grant_type':    'refresh_token',
+                        'refresh_token': self._tokens['refresh_token'],
+                    }, auth=(self.client_id, self.client_secret))
 
-            if resp.status_code in (400, 401):
-                # Log the full Xero error body so we can see exactly what went wrong
-                logger.error(f'Xero token refresh failed ({resp.status_code}): {resp.text}')
-                raise XeroAuthError(
-                    f'Xero refresh token rejected ({resp.status_code}) — re-auth required. '
-                    f'Visit /xero/auth to reconnect. Xero said: {resp.text[:200]}'
-                )
+                    if resp.status_code in (400, 401):
+                        logger.error(f'Xero token refresh failed ({resp.status_code}): {resp.text}')
+                        raise XeroAuthError(
+                            f'Xero refresh token rejected ({resp.status_code}) — re-auth required. '
+                            f'Visit /xero/auth to reconnect. Xero said: {resp.text[:200]}'
+                        )
 
-            resp.raise_for_status()
-            new = resp.json()
-            new['expires_at'] = time.time() + new.get('expires_in', 1800) - 60
-            new['tenant_id']  = self._tokens['tenant_id']
-            new['tenant_name'] = self._tokens['tenant_name']
-            self._save_tokens(new)
+                    resp.raise_for_status()
+                    new = resp.json()
+                    new['expires_at']  = time.time() + new.get('expires_in', 1800) - 60
+                    new['tenant_id']   = self._tokens['tenant_id']
+                    new['tenant_name'] = self._tokens['tenant_name']
+                    self._save_tokens(new)
 
         return self._tokens['access_token']
 
