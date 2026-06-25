@@ -40,19 +40,23 @@ Known clients (match against these exactly, pick the closest, or leave blank if 
 
 Return this exact JSON structure:
 {{
+  "is_job_email": true,
   "job_title": "clean concise job name, e.g. Lane Cove High School",
   "client": "exact name from the known clients list above, or empty string if no confident match",
   "estimated_hours": 6.0,
-  "hourly_rate": 130.0
+  "hourly_rate": 130.0,
+  "due_date": "2025-06-20"
 }}
 
 Rules:
+- is_job_email: false ONLY if this is clearly NOT a construction job/tender/quote request — e.g. an automated account notification (Google, Microsoft, banking alerts), a newsletter, a calendar invite unrelated to a job, spam, or personal correspondence with no project content. If there's any genuine ambiguity, default to true — a missed real job is worse than an extra false positive. If is_job_email is false, all other fields should be null/empty and will be ignored.
 - PRIORITY: The subject line is the primary source of truth for billing details (hourly_rate, estimated_hours, client). If the subject and body contain conflicting values for these fields, always use the subject line value.
 - The body is supplementary — use it only to fill in a more complete job_title or project name if the subject is vague, or to find the client if not in the subject.
 - job_title: extract the location/project name only, remove client name, rate, and hours
 - client: match to the closest known client even if the email uses a shortened or informal version (e.g. "Finnbarr construction" should match "Finnbarr Construction Pty Ltd", "BR Masonry" should match "BR Masonry Pty Ltd"). Only leave blank if there is genuinely no recognisable match.
 - estimated_hours: number only (e.g. 6.0), or null if not mentioned
 - hourly_rate: number only (e.g. 130.0), or null if not mentioned
+- due_date: the tender/submission due date as YYYY-MM-DD (e.g. "2025-06-20"), or null if not mentioned. Look for phrases like "due", "by", "closes", "deadline", "submission date", "tender closes". If only a day/month is given with no year, assume the next upcoming occurrence of that date.
 - Return ONLY the JSON object, nothing else"""
 
     try:

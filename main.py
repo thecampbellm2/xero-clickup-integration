@@ -24,7 +24,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import config
 from clickup_client import ClickUpClient, STATUS_DEPOSIT_INVOICED, STATUS_FINAL_INVOICED
-from xero_client import XeroClient
+from xero_client import XeroClient, XeroAuthError
 from gmail_client import GmailClient
 from email_parser import parse_job_email, parse_reply_email
 import notifier
@@ -191,8 +191,16 @@ def clickup_webhook():
 @app.route('/webhooks/xero', methods=['POST'])
 def xero_webhook():
     """
-    Receives payment notifications from Xero.
-    When an invoice is marked PAID, updates the matching ClickUp task.
+    Receives contact/invoice notifications from Xero.
+
+    IMPORTANT: Xero requires a response within 5 seconds or it considers the
+    delivery failed and retries the SAME batch (immediately, then with
+    decreasing frequency for 24h). Bank-reconciliation-driven Contact CREATE
+    events can arrive in batches of 15-20+, and processing each one
+    synchronously (Xero lookup + ClickUp + SendGrid email) easily blows past
+    5 seconds — which both triggers Xero retries AND can exceed gunicorn's
+    worker timeout. So: verify + ack first, then do the real work in a
+    background thread.
 
     Note: Xero sends an "intent to receive" validation request when you
     first register this endpoint — this handler responds correctly to it.
@@ -209,15 +217,20 @@ def xero_webhook():
         return '', 200
 
     events = (request.json or {}).get('events', [])
-    for event in events:
-        category  = event.get('eventCategory')
-        eventtype = event.get('eventType')
-        resource  = event.get('resourceId')
 
-        if eventtype == 'UPDATE' and category == 'INVOICE':
-            handle_payment(resource)
-        elif eventtype == 'CREATE' and category == 'CONTACT':
-            handle_new_contact(resource)
+    def _process_events(events):
+        for event in events:
+            category  = event.get('eventCategory')
+            eventtype = event.get('eventType')
+            resource  = event.get('resourceId')
+
+            if eventtype == 'UPDATE' and category == 'INVOICE':
+                handle_payment(resource)
+            elif eventtype == 'CREATE' and category == 'CONTACT':
+                handle_new_contact(resource)
+
+    import threading
+    threading.Thread(target=_process_events, args=(events,), daemon=True).start()
 
     return '', 200
 
@@ -431,10 +444,38 @@ def handle_payment(invoice_id: str):
         else:
             logger.info(f'Invoice {invoice_id} paid but no CU- references found — skipping')
 
+    except XeroAuthError as e:
+        logger.error(f'handle_payment failed for invoice {invoice_id}: {e}')
+        notifier.xero_auth_failed(gmail, config.NOTIFICATION_EMAILS, sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
+
     except Exception as e:
         logger.error(f'handle_payment failed for invoice {invoice_id}: {e}')
 
 
+
+
+import re
+
+# Xero's bank-reconciliation engine auto-creates a real Contact record every time
+# it matches an unrecognized bank-statement payee description — these are NOT
+# real construction clients and shouldn't trigger a "add to ClickUp" alert.
+# This is a heuristic, not a perfect classifier — refine the pattern list as
+# new false positives/negatives turn up.
+_BANK_FEED_CONTACT_PATTERN = re.compile(
+    r'transfer\s+(to|from)\b'      # "Transfer to xx72", "Transfer From D R DUREN"
+    r'|\bbpay\b'                   # "906919044 partial CommBank app BPAY"
+    r'|\bcommbank\b'
+    r'|\bpayid\b'
+    r'|\bcard\s*xx?\d+'            # "Card xx1696"
+    r'|\bxx\d+\b'                  # masked account refs: "xx72", "xx0282"
+    r'|^\d{5,}'                    # starts with a long bank reference number
+    r'|^unknown$',
+    re.IGNORECASE,
+)
+
+
+def _is_bank_feed_contact(name: str) -> bool:
+    return bool(_BANK_FEED_CONTACT_PATTERN.search(name))
 
 
 def handle_new_contact(contact_id: str):
@@ -453,9 +494,18 @@ def handle_new_contact(contact_id: str):
             logger.warning(f'Contact {contact_id} has no name — skipping')
             return
 
+        if _is_bank_feed_contact(name):
+            logger.info(f'Contact {contact_id} ("{name}") looks like a bank-feed artifact — skipping')
+            return
+
         added = clickup.add_client_option(name)
         if not added:
             notifier.new_contact_action_required(gmail, config.NOTIFICATION_EMAILS, name, sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
+
+    except XeroAuthError as e:
+        logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
+        notifier.xero_auth_failed(gmail, config.NOTIFICATION_EMAILS, sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
+
 
     except Exception as e:
         logger.error(f'handle_new_contact failed for contact {contact_id}: {e}')
@@ -609,6 +659,13 @@ def process_job_emails():
                 if not data:
                     logger.error(f'Could not parse email {email["id"]} — skipping')
                     notifier.email_parse_failed(gmail, config.NOTIFICATION_EMAILS, email['subject'], 'Claude API could not extract job details', sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
+                    gmail.mark_processed(email['id'])
+                    continue
+
+                if data.get('is_job_email') is False:
+                    # Inbox gets non-job mail too (account notifications, newsletters, etc.)
+                    # — quietly mark as processed rather than spinning up a phantom job.
+                    logger.info(f'Not a job email — skipping: {email["subject"]}')
                     gmail.mark_processed(email['id'])
                     continue
 
@@ -791,6 +848,10 @@ def batch_invoices():
 
         logger.info(f'Batch invoices: {len(deposit_tasks)} deposit + {len(final_tasks)} final tasks')
 
+        # Tracks every task skipped due to missing data so we can alert on it
+        # once at the end of the run, rather than relying on someone reading Render logs.
+        incomplete_tasks = []   # list of dicts: {task_id, task_name, client_name, reason}
+
         # Group tasks by client
         client_groups = defaultdict(list)
         for task in all_tasks:
@@ -798,6 +859,12 @@ def batch_invoices():
             client_name = fields.get('client', '').strip()
             if not client_name:
                 logger.warning(f'Task {task["id"]} has no Client field — skipping')
+                incomplete_tasks.append({
+                    'task_id':     task['id'],
+                    'task_name':   task.get('name', 'Unknown Job'),
+                    'client_name': '(none)',
+                    'reason':      'No Client field set',
+                })
                 continue
             client_groups[client_name].append((task, fields))
 
@@ -825,6 +892,12 @@ def batch_invoices():
                             continue
                         if not hourly_rate or not est_ms:
                             logger.warning(f'Task {task_id}: missing rate or estimate — skipping')
+                            incomplete_tasks.append({
+                                'task_id':     task_id,
+                                'task_name':   task_name,
+                                'client_name': client_name,
+                                'reason':      'Missing Hourly Rate or Time Estimate (deposit pending)',
+                            })
                             continue
                         desc = (
                             f"Deposit \u2013 {task_name} \u2013 "
@@ -846,12 +919,24 @@ def batch_invoices():
                         total_hours = float(fields.get('total_hours_invoiced') or 0)
                         if not total_hours or not hourly_rate:
                             logger.warning(f'Task {task_id}: missing total hours or rate — skipping')
+                            incomplete_tasks.append({
+                                'task_id':     task_id,
+                                'task_name':   task_name,
+                                'client_name': client_name,
+                                'reason':      'Missing Total Hours Invoiced or Hourly Rate (final pending)',
+                            })
                             continue
                         # If no estimate set, check whether a deposit was ever sent
                         if not est_ms:
                             deposit_invoice_num = fields.get('deposit_invoice_number') or ''
                             if deposit_invoice_num:
                                 logger.warning(f'Task {task_id}: deposit was sent but estimate is 0 — skipping')
+                                incomplete_tasks.append({
+                                    'task_id':     task_id,
+                                    'task_name':   task_name,
+                                    'client_name': client_name,
+                                    'reason':      'Deposit invoiced but Time Estimate is 0 — needs manual review',
+                                })
                                 continue
                             # No deposit sent — invoice for full amount
                             deposit_hrs = 0.0
@@ -948,6 +1033,15 @@ def batch_invoices():
             except Exception as e:
                 logger.error(f'Batch invoice error for client {client_name}: {e}')
                 notifier.batch_failed(gmail, config.NOTIFICATION_EMAILS, client_name, str(e), sendgrid_api_key=config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
+
+        if incomplete_tasks:
+            logger.warning(f'Batch invoices: {len(incomplete_tasks)} task(s) skipped due to missing data')
+            notifier.batch_incomplete_tasks(
+                gmail, config.NOTIFICATION_EMAILS, incomplete_tasks,
+                sendgrid_api_key=config.SENDGRID_API_KEY,
+                clickup_token=config.CLICKUP_API_TOKEN,
+                clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID,
+            )
 
     except Exception as e:
         logger.error(f'batch_invoices failed: {e}')
