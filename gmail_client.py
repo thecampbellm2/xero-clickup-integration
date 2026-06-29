@@ -83,6 +83,7 @@ class GmailClient:
         sender     = msg.get('From', '')
         message_id = msg.get('Message-ID', msg.get('Message-Id', ''))
         in_reply_to = msg.get('In-Reply-To', '')
+        references  = msg.get('References', '')
         body     = ''
         attachments = []
 
@@ -119,6 +120,7 @@ class GmailClient:
             'attachments': attachments,
             'message_id':  message_id,
             'in_reply_to': in_reply_to,
+            'references':  references,
         }
 
     def _decode_str(self, value: str) -> str:
@@ -161,8 +163,13 @@ class GmailClient:
     # ------------------------------------------------------------------ #
 
     def send_email(self, to_list: list, subject: str, body: str,
-                   html_body: str = '', sendgrid_api_key: str = ''):
-        """Send email via SendGrid HTTP API (avoids Render SMTP port blocking)."""
+                   html_body: str = '', sendgrid_api_key: str = '',
+                   headers: dict = None):
+        """Send email via SendGrid HTTP API (avoids Render SMTP port blocking).
+
+        `headers` is an optional dict of custom MIME headers (e.g. In-Reply-To,
+        References) added to the outgoing message so replies thread correctly.
+        """
         if not sendgrid_api_key:
             logger.error('SENDGRID_API_KEY not set — cannot send email')
             return
@@ -176,18 +183,22 @@ class GmailClient:
                 logger.error('No email body provided')
                 return
 
+            payload = {
+                'personalizations': [{'to': [{'email': e} for e in to_list]}],
+                'from':    {'email': self.username, 'name': 'NEPM Automation'},
+                'subject': subject,
+                'content': content,
+            }
+            if headers:
+                payload['headers'] = headers
+
             resp = requests.post(
                 'https://api.sendgrid.com/v3/mail/send',
                 headers={
                     'Authorization': f'Bearer {sendgrid_api_key}',
                     'Content-Type':  'application/json',
                 },
-                json={
-                    'personalizations': [{'to': [{'email': e} for e in to_list]}],
-                    'from':    {'email': self.username, 'name': 'NEPM Automation'},
-                    'subject': subject,
-                    'content': content,
-                },
+                json=payload,
                 timeout=15,
             )
             if resp.ok:
@@ -199,11 +210,21 @@ class GmailClient:
 
     def send_reply(self, to: str, subject: str, body: str,
                    in_reply_to: str = '', sendgrid_api_key: str = ''):
-        """Send a reply email via SendGrid HTTP API."""
+        """Send a reply email via SendGrid HTTP API.
+
+        Sets In-Reply-To/References to `in_reply_to` (the Message-ID of the
+        original job email) so that when George replies to this question, her
+        reply carries the original Message-ID in its References chain — which is
+        how process_job_emails matches the reply back to the pending job.
+        """
         reply_subject = subject if subject.lower().startswith('re:') else f'Re: {subject}'
+        headers = None
+        if in_reply_to:
+            headers = {'In-Reply-To': in_reply_to, 'References': in_reply_to}
         self.send_email(
             to_list           = [to],
             subject           = reply_subject,
             body              = body,
             sendgrid_api_key  = sendgrid_api_key,
+            headers           = headers,
         )
