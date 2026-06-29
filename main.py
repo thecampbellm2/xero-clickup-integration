@@ -541,6 +541,46 @@ The job will be automatically imported after 3 hours if no reply is received.
 \u2014 NEPM Automation"""
 
 
+def _normalize_subject(subject: str) -> str:
+    """Strip any number of leading Re:/Fwd: prefixes and surrounding whitespace."""
+    return re.sub(r'^\s*((re|fwd|fw)\s*:\s*)+', '', subject or '', flags=re.IGNORECASE).strip().lower()
+
+
+def _match_pending_reply(email: dict, pending_by_mid: dict):
+    """
+    Decide whether an incoming email is George's reply to a pending-field question.
+
+    George replies to the *automated question email*, not the original job email,
+    so her reply's In-Reply-To points at the question (whose Message-ID we never
+    captured). But because the question was sent with References = the original
+    job email's Message-ID, her reply's References chain carries that original
+    Message-ID — which is the key in pending_by_mid. We match on that.
+
+    Falls back to a sender + normalized-subject match when threading headers are
+    missing or rewritten by an intermediate mail client.
+
+    Returns (mid, pending_job) or None.
+    """
+    ref_ids = set(re.findall(r'<[^>]+>', email.get('references', '') or ''))
+    in_reply_to = (email.get('in_reply_to', '') or '').strip()
+    if in_reply_to:
+        ref_ids.add(in_reply_to)
+
+    for key, (mid, pending_job) in pending_by_mid.items():
+        if key and key in ref_ids:
+            return mid, pending_job
+
+    # Fallback: a reply from George whose subject matches a pending job's subject.
+    sender = (email.get('sender', '') or '').lower()
+    if config.GEORGE_EMAIL.lower() in sender:
+        reply_subj = _normalize_subject(email.get('subject', ''))
+        if reply_subj:
+            for key, (mid, pending_job) in pending_by_mid.items():
+                if _normalize_subject(pending_job.get('subject', '')) == reply_subj:
+                    return mid, pending_job
+    return None
+
+
 def _missing_fields(client_name, hourly_rate, estimated_hours) -> list:
     missing = []
     if not client_name:
@@ -595,9 +635,9 @@ def process_job_emails():
 
         # Load pending jobs to detect replies
         all_pending    = pending_store.get_all(config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
-        pending_by_mid = {job['original_message_id']: (mid, job)
+        pending_by_mid = {job['original_message_id'].strip(): (mid, job)
                           for mid, job in all_pending.items()
-                          if 'original_message_id' in job}
+                          if job.get('original_message_id')}
 
         # Get current Client dropdown options for fuzzy matching
         client_field   = clickup._fields.get('client', {})
@@ -605,11 +645,10 @@ def process_job_emails():
 
         for email in emails:
             try:
-                in_reply_to = email.get('in_reply_to', '').strip()
-
                 # ── Is this a reply to a pending job question? ────────
-                if in_reply_to and in_reply_to in pending_by_mid:
-                    mid, pending_job = pending_by_mid[in_reply_to]
+                match = _match_pending_reply(email, pending_by_mid)
+                if match:
+                    mid, pending_job = match
                     logger.info(f'Reply received for pending job: {pending_job.get("job_title")}')
 
                     reply_data = parse_reply_email(
