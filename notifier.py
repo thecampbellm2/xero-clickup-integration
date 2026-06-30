@@ -91,6 +91,32 @@ Check ClickUp for jobs belonging to {client} that are still sitting at "Invoice 
     _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
+def batch_incomplete_tasks(gmail, recipients, incomplete_tasks, sendgrid_api_key='', clickup_token='', clickup_channel=''):
+    """Alert that the batch run skipped one or more tasks due to missing/invalid data.
+
+    incomplete_tasks is a list of dicts: {task_id, task_name, client_name, reason}.
+    """
+    count = len(incomplete_tasks)
+    subject = f'⚠️ Batch invoice — {count} task(s) skipped, need attention'
+    detail = '\n\n'.join(
+        f"• {t.get('task_name', 'Unknown Job')} ({t.get('client_name') or 'Unknown client'})\n"
+        f"    Task ID: {t.get('task_id', '?')}\n"
+        f"    Reason:  {t.get('reason', 'Unknown')}"
+        for t in incomplete_tasks
+    )
+    body = f"""The 3pm batch invoice run skipped the following task(s) because of missing or invalid data — no invoice was created for them.
+
+Time: {_now()}
+
+{detail}
+
+Action required:
+Open each task in ClickUp, fill in the missing field(s), then hit /batch/invoices to retry (or wait for the next 3pm run).
+
+— NEPM Automation"""
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
+
+
 def email_parse_failed(gmail, recipients, email_subject, error, sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = f'⚠️ Job email could not be processed — {email_subject[:50]}'
     body = f"""An email arrived but could not be processed into a ClickUp task.
