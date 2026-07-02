@@ -87,8 +87,16 @@ class XeroClient:
     #  Token management                                                    #
     # ------------------------------------------------------------------ #
 
-    def _load_tokens(self) -> dict:
-        return load_tokens(TOKEN_FILE, 'xero', config.GITHUB_TOKEN, config.TOKEN_GIST_ID)
+    # Refresh-retry tuning. Xero's identity service intermittently returns
+    # 400 invalid_grant ("Refresh token has been consumed") for a token that is
+    # actually still valid — confirmed in logs where the very next refresh with
+    # the same token succeeded. So we retry a few times before declaring re-auth.
+    _REFRESH_ATTEMPTS = 3
+    _REFRESH_BACKOFF_S = 3
+
+    def _load_tokens(self, prefer_remote: bool = False) -> dict:
+        return load_tokens(TOKEN_FILE, 'xero', config.GITHUB_TOKEN, config.TOKEN_GIST_ID,
+                           prefer_remote=prefer_remote)
 
     def _save_tokens(self, tokens: dict):
         self._tokens = tokens
@@ -105,27 +113,56 @@ class XeroClient:
             with self._refresh_lock:
                 # Re-check inside the lock — another thread may have already refreshed
                 if time.time() >= self._tokens.get('expires_at', 0):
-                    logger.info('Access token expired — refreshing')
-                    resp = requests.post(TOKEN_URL, data={
-                        'grant_type':    'refresh_token',
-                        'refresh_token': self._tokens['refresh_token'],
-                    }, auth=(self.client_id, self.client_secret))
-
-                    if resp.status_code in (400, 401):
-                        logger.error(f'Xero token refresh failed ({resp.status_code}): {resp.text}')
-                        raise XeroAuthError(
-                            f'Xero refresh token rejected ({resp.status_code}) — re-auth required. '
-                            f'Visit /xero/auth to reconnect. Xero said: {resp.text[:200]}'
-                        )
-
-                    resp.raise_for_status()
-                    new = resp.json()
-                    new['expires_at']  = time.time() + new.get('expires_in', 1800) - 60
-                    new['tenant_id']   = self._tokens['tenant_id']
-                    new['tenant_name'] = self._tokens['tenant_name']
-                    self._save_tokens(new)
+                    self._refresh_access_token()
 
         return self._tokens['access_token']
+
+    def _refresh_access_token(self):
+        """
+        Refresh the access token, retrying transient invalid_grant rejections.
+
+        On a 400/401 (or any non-2xx) we reload the token straight from the Gist —
+        in case another writer legitimately rotated it — and retry a few times with
+        a short backoff. Only after exhausting attempts do we raise XeroAuthError
+        (which alerts + asks for re-auth). Callers hold self._refresh_lock, so the
+        brief sleeps don't cause concurrent refreshes.
+        """
+        last_status, last_text = None, ''
+        for attempt in range(1, self._REFRESH_ATTEMPTS + 1):
+            logger.info(f'Access token expired — refreshing (attempt {attempt}/{self._REFRESH_ATTEMPTS})')
+            resp = requests.post(TOKEN_URL, data={
+                'grant_type':    'refresh_token',
+                'refresh_token': self._tokens['refresh_token'],
+            }, auth=(self.client_id, self.client_secret))
+
+            if resp.ok:
+                new = resp.json()
+                new['expires_at']  = time.time() + new.get('expires_in', 1800) - 60
+                new['tenant_id']   = self._tokens['tenant_id']
+                new['tenant_name'] = self._tokens['tenant_name']
+                self._save_tokens(new)
+                if attempt > 1:
+                    logger.info(f'Xero token refresh succeeded on attempt {attempt}')
+                return
+
+            last_status, last_text = resp.status_code, resp.text
+            logger.warning(
+                f'Xero token refresh rejected ({resp.status_code}) on attempt '
+                f'{attempt}/{self._REFRESH_ATTEMPTS}: {resp.text[:200]}'
+            )
+
+            if attempt < self._REFRESH_ATTEMPTS:
+                time.sleep(self._REFRESH_BACKOFF_S)
+                # Pick up a fresher token if another writer rotated one into the Gist.
+                remote = self._load_tokens(prefer_remote=True)
+                if remote.get('refresh_token'):
+                    self._tokens = remote
+
+        logger.error(f'Xero token refresh failed after {self._REFRESH_ATTEMPTS} attempts ({last_status}): {last_text}')
+        raise XeroAuthError(
+            f'Xero refresh token rejected after {self._REFRESH_ATTEMPTS} attempts — re-auth required. '
+            f'Visit /xero/auth to reconnect. Xero said: {last_text[:200]}'
+        )
 
     def _headers(self) -> dict:
         return {

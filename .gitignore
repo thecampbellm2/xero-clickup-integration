@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / local token stores — the GitHub Gist is the source of truth.
+# A committed token file would ship a stale/consumed refresh token on every deploy.
+.env
+*_tokens.json

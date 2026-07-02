@@ -25,16 +25,20 @@ def _github_headers(token: str) -> dict:
     }
 
 
-def load_tokens(token_file: str, gist_key: str, github_token: str, gist_id: str) -> dict:
+def load_tokens(token_file: str, gist_key: str, github_token: str, gist_id: str,
+                prefer_remote: bool = False) -> dict:
     """
     Load tokens for a service.
     Priority: local file → GitHub Gist → empty dict.
 
-    token_file  — local filename, e.g. 'xero_tokens.json'
-    gist_key    — key inside the Gist JSON object, e.g. 'xero' or 'gmail'
+    token_file    — local filename, e.g. 'xero_tokens.json'
+    gist_key      — key inside the Gist JSON object, e.g. 'xero' or 'gmail'
+    prefer_remote — skip the local file and read straight from the Gist. Used when
+                    an in-memory token has just been rejected, so we pick up any
+                    fresher token another writer may have rotated into the Gist.
     """
     # 1. Try local file (fastest, works when file survives)
-    if os.path.exists(token_file):
+    if not prefer_remote and os.path.exists(token_file):
         try:
             with open(token_file) as f:
                 data = json.load(f)
