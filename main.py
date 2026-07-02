@@ -29,6 +29,7 @@ from gmail_client import GmailClient
 from email_parser import parse_job_email, parse_reply_email
 import notifier
 from daily_summary import send_daily_summary
+from weekly_summary import send_weekly_summary
 import pending_store
 
 # ------------------------------------------------------------------ #
@@ -126,6 +127,19 @@ def summary_send_manual():
     import threading
     threading.Thread(target=send_daily_summary, args=(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY), kwargs={'clickup_token': config.CLICKUP_API_TOKEN, 'clickup_channel': config.CLICKUP_ALERT_CHANNEL_ID}, daemon=True).start()
     return jsonify({'status': 'summary sending'}), 200
+
+
+@app.route('/summary/weekly')
+def summary_weekly_manual():
+    """Manually trigger the weekly summary email — runs in background to avoid timeout."""
+    import threading
+    threading.Thread(
+        target=send_weekly_summary,
+        args=(xero, clickup, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY),
+        kwargs={'clickup_token': config.CLICKUP_API_TOKEN, 'clickup_channel': config.CLICKUP_ALERT_CHANNEL_ID},
+        daemon=True,
+    ).start()
+    return jsonify({'status': 'weekly summary sending'}), 200
 
 
 @app.route('/batch/invoices')
@@ -1094,8 +1108,9 @@ scheduler = BackgroundScheduler(timezone=sydney)
 scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
 scheduler.add_job(batch_invoices, 'cron', hour=15, minute=0, id='batch_invoices')
 scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', hour=17, minute=30, id='daily_summary')
+scheduler.add_job(lambda: send_weekly_summary(xero, clickup, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', day_of_week='fri', hour=17, minute=35, id='weekly_summary')
 scheduler.start()
-logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm, daily summary at 5:30pm Sydney')
+logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm, daily summary at 5:30pm, weekly summary Fri 5:35pm Sydney')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
