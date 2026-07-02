@@ -1,0 +1,42 @@
+name: Deploy to Render
+
+# Auto-deploy on every push to main by calling a Render Deploy Hook.
+# Render's own auto-deploy can't fire for this service because the repo is
+# connected by public URL (no GitHub App / webhook), so we trigger it here.
+#
+# Setup (one-time):
+#   1. Render → service → Settings → Deploy Hook → copy the URL.
+#   2. GitHub → repo → Settings → Secrets and variables → Actions →
+#      New repository secret → name: RENDER_DEPLOY_HOOK_URL, value: that URL.
+# workflow_dispatch also lets you trigger a deploy manually from the Actions tab.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Don't run overlapping deploy triggers; let an in-flight one finish.
+concurrency:
+  group: render-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::RENDER_DEPLOY_HOOK_URL secret is not set — add it in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "Triggering Render deploy…"
+          code=$(curl -sS -w '%{http_code}' -o response.txt -X POST "$HOOK")
+          echo "Render responded HTTP $code"
+          cat response.txt || true
+          case "$code" in
+            2*) echo "Deploy triggered successfully." ;;
+            *)  echo "::error::Render deploy hook failed (HTTP $code)"; exit 1 ;;
+          esac
