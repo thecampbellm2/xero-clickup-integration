@@ -261,21 +261,24 @@ class XeroClient:
     #  Daily summary queries                                               #
     # ------------------------------------------------------------------ #
 
-    def get_todays_documents(self) -> dict:
+    def get_documents_between(self, start_date, end_date) -> dict:
         """
-        Return all automation-created invoices and credit notes from today.
+        Return all automation-created (CU-*) invoices and credit notes whose
+        Date falls within [start_date, end_date] inclusive.
+        start_date / end_date are datetime.date objects.
         Returns { 'invoices': [...], 'credit_notes': [...] }
         """
-        from datetime import date
-        import pytz
-        today = date.today()
-        date_filter = f'Date=DateTime({today.year},{today.month},{today.day})'
+        s, e = start_date, end_date
+        date_filter = (
+            f'Date>=DateTime({s.year},{s.month},{s.day})'
+            f'&&Date<=DateTime({e.year},{e.month},{e.day})'
+        )
 
         def fetch(endpoint):
             resp = requests.get(
                 f'{API_BASE}/{endpoint}',
                 headers=self._headers(),
-                params={'where': date_filter, 'order': 'UpdatedDateUTC DESC'}
+                params={'where': date_filter, 'order': 'Date DESC'}
             )
             resp.raise_for_status()
             key = 'Invoices' if endpoint == 'Invoices' else 'CreditNotes'
@@ -288,3 +291,9 @@ class XeroClient:
             'invoices':     fetch('Invoices'),
             'credit_notes': fetch('CreditNotes'),
         }
+
+    def get_todays_documents(self) -> dict:
+        """Automation-created invoices and credit notes from today (used by the daily summary)."""
+        from datetime import date
+        today = date.today()
+        return self.get_documents_between(today, today)

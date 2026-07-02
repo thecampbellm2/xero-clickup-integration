@@ -176,3 +176,33 @@ class ClickUpClient:
         except Exception as e:
             logger.error(f'Failed to get tasks with status "{status}": {e}')
             return []
+
+    def get_all_tasks(self, include_closed: bool = True) -> list:
+        """
+        Return every task in the Jobs list (paginated), including closed ones by
+        default. Used by the weekly summary to bucket tasks by created/completed
+        date. Task volume is small, so fetching all and filtering locally is fine.
+        """
+        tasks, page = [], 0
+        try:
+            while True:
+                resp = requests.get(
+                    f'{BASE}/list/{self.list_id}/task',
+                    headers=self.headers,
+                    params={
+                        'include_closed': 'true' if include_closed else 'false',
+                        'subtasks': 'false',
+                        'page': page,
+                    },
+                )
+                resp.raise_for_status()
+                data  = resp.json()
+                batch = data.get('tasks', [])
+                tasks.extend(batch)
+                # ClickUp returns last_page=true (or an empty batch) on the final page
+                if data.get('last_page', True) or not batch:
+                    break
+                page += 1
+        except Exception as e:
+            logger.error(f'Failed to fetch all tasks: {e}')
+        return tasks
