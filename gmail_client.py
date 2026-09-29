@@ -165,11 +165,16 @@ class GmailClient:
     def send_email(self, to_list: list, subject: str, body: str,
                    html_body: str = '', sendgrid_api_key: str = '',
                    headers: dict = None):
-        """Send email via SendGrid HTTP API (avoids Render SMTP port blocking).
+        """Send email via Resend (or SendGrid if Resend isn't configured). HTTP APIs avoid
+        Render's SMTP port blocking.
 
         `headers` is an optional dict of custom MIME headers (e.g. In-Reply-To,
         References) added to the outgoing message so replies thread correctly.
         """
+        import config
+        if config.RESEND_API_KEY:
+            self._send_via_resend(to_list, subject, body, html_body, headers)
+            return
         if not sendgrid_api_key:
             logger.error('SENDGRID_API_KEY not set — cannot send email')
             return
@@ -207,6 +212,38 @@ class GmailClient:
                 logger.error(f'SendGrid error {resp.status_code}: {resp.text}')
         except Exception as e:
             logger.error(f'Failed to send email: {e}')
+
+    def _send_via_resend(self, to_list: list, subject: str, body: str, html_body: str = '',
+                         headers: dict = None):
+        import config
+        payload = {
+            'from':     f'NEPM Automation <{config.MAIL_FROM}>',
+            'to':       list(to_list),
+            'reply_to': self.username,          # replies go back to the intake inbox
+            'subject':  subject,
+        }
+        if body:
+            payload['text'] = body
+        if html_body:
+            payload['html'] = html_body
+        if not body and not html_body:
+            logger.error('No email body provided')
+            return
+        if headers:
+            payload['headers'] = headers
+        try:
+            resp = requests.post(
+                'https://api.resend.com/emails',
+                headers={'Authorization': f'Bearer {config.RESEND_API_KEY}'},
+                json=payload,
+                timeout=15,
+            )
+            if resp.ok:
+                logger.info(f'Email sent via Resend → {to_list}: {subject}')
+            else:
+                logger.error(f'Resend error {resp.status_code}: {resp.text[:300]}')
+        except Exception as e:
+            logger.error(f'Failed to send email via Resend: {e}')
 
     def send_reply(self, to: str, subject: str, body: str,
                    in_reply_to: str = '', sendgrid_api_key: str = ''):

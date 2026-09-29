@@ -13,6 +13,7 @@ Endpoints:
 import hashlib
 import hmac
 import logging
+import re
 import os
 
 from flask import Flask, jsonify, redirect, request
@@ -253,6 +254,33 @@ def xero_webhook():
 #  Business logic                                                      #
 # ------------------------------------------------------------------ #
 
+
+_CLIENT_CONTACT = re.compile(r'Client contact:\s*([^|\n]*)\|\s*([^|\n]*)\|\s*([^\n]*)')
+
+
+def _client_contact_details(task: dict) -> dict:
+    """First/last name, email, phone from the "Client contact: Name | email | phone" line the client
+    portal writes into jobs it creates. Empty for jobs imported from email."""
+    text = task.get('text_content') or task.get('description') or ''
+    m = _CLIENT_CONTACT.search(text)
+    if not m:
+        return {}
+    first, _, last = m.group(1).strip().partition(' ')
+    return {'first_name': first, 'last_name': last.strip(), 'email': m.group(2).strip(), 'phone': m.group(3).strip()}
+
+
+def _contact_for(client_name: str, task: dict) -> str:
+    """Xero ContactID for the job's client, creating the contact (and saying so) if it's new."""
+    details = _client_contact_details(task)
+    contact_id, created = xero.get_or_create_contact(client_name, details)
+    if created:
+        notifier.xero_contact_created(gmail, config.NOTIFICATION_EMAILS, client_name, details,
+                                      task.get('name', 'Unknown'), sendgrid_api_key=config.SENDGRID_API_KEY,
+                                      clickup_token=config.CLICKUP_API_TOKEN,
+                                      clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID)
+    return contact_id
+
+
 def handle_deposit_invoice(task_id: str):
     """
     Triggered when a job moves to 'Send Deposit Invoice'.
@@ -294,7 +322,7 @@ def handle_deposit_invoice(task_id: str):
         )
 
         # --- Create invoice in Xero ---
-        contact_id = xero.get_contact_id(client_name)
+        contact_id = _contact_for(client_name, task)
         invoice    = xero.create_invoice(
             contact_id        = contact_id,
             line_items        = [{
@@ -396,7 +424,7 @@ def handle_final_invoice(task_id: str):
             doc_type = 'Final invoice'
 
         # --- Create invoice or credit note in Xero ---
-        contact_id = xero.get_contact_id(client_name)
+        contact_id = _contact_for(client_name, task)
         invoice    = xero.create_invoice(
             contact_id        = contact_id,
             line_items        = [{
@@ -1047,7 +1075,7 @@ def batch_invoices():
                 regular_updates = [u for u in task_updates if u[1] != 'credit']
                 credit_updates  = [u for u in task_updates if u[1] == 'credit']
 
-                contact_id = xero.get_contact_id(client_name)
+                contact_id = _contact_for(client_name, task_list[0][0])
 
                 def write_back(doc, updates, doc_type):
                     doc_number = doc.get('InvoiceNumber', '') or doc.get('CreditNoteNumber', '')
