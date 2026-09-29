@@ -39,7 +39,14 @@ NOTIFICATION_EMAILS = [e.strip() for e in os.environ.get('NOTIFICATION_EMAILS', 
 GEORGE_EMAIL = os.environ.get('GEORGE_EMAIL', 'georgina@nationalestimation.com.au')
 
 # SendGrid (transactional email via HTTP — avoids Render SMTP port blocking)
+# The SendGrid free trial ended 2026-08-09; Resend is used instead when RESEND_API_KEY is set.
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
+
+# Resend (transactional email via HTTP). Sends from our own domain (verified in Resend) with
+# Reply-To set to the intake Gmail, so George's replies to missing-field questions still land
+# in nepmclickup@gmail.com where process_job_emails matches them to the pending job.
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
+MAIL_FROM      = os.environ.get('MAIL_FROM', 'automation@nationalestimation.com.au')
 
 # ClickUp alert channel — DM channel used for automation error notifications
 # Discovered channel ID: Mike & George DM (2kz0qr1p-296)

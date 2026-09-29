@@ -259,6 +259,54 @@ class XeroClient:
             return resp.json()['Invoices'][0]
 
 
+    def find_contact_id(self, name: str, email: str = '') -> str | None:
+        """ContactID for `name` (exact, then ignoring capitals), then for `email`. None if none."""
+        safe = name.replace('"', '')
+        for where in (f'Name=="{safe}"', f'Name.ToLower()=="{safe.lower()}"'):
+            resp = requests.get(f'{API_BASE}/Contacts', headers=self._headers(),
+                                params={'where': where, 'summaryOnly': 'true'})
+            resp.raise_for_status()
+            contacts = resp.json().get('Contacts', [])
+            if contacts:
+                return contacts[0]['ContactID']
+        if email:
+            resp = requests.get(f'{API_BASE}/Contacts', headers=self._headers(),
+                                params={'where': f'EmailAddress.ToLower()=="{email.lower().replace(chr(34), "")}"',
+                                        'summaryOnly': 'true'})
+            resp.raise_for_status()
+            contacts = resp.json().get('Contacts', [])
+            if contacts:
+                logger.info(f'Xero contact for "{name}" found by email {email}: "{contacts[0].get("Name")}"')
+                return contacts[0]['ContactID']
+        return None
+
+    def get_or_create_contact(self, name: str, details: dict | None = None) -> tuple[str, bool]:
+        """(ContactID, created). Creates the contact if it doesn't exist yet.
+
+        `details` may hold first_name, last_name, email, phone (from the job's "Client contact:" line
+        written by the client portal). Name must match the ClickUp Client dropdown option.
+        """
+        details = details or {}
+        existing = self.find_contact_id(name, details.get('email', ''))
+        if existing:
+            return existing, False
+        contact = {'Name': name}
+        if details.get('first_name'):
+            contact['FirstName'] = details['first_name']
+        if details.get('last_name'):
+            contact['LastName'] = details['last_name']
+        if details.get('email'):
+            contact['EmailAddress'] = details['email']
+        if details.get('phone'):
+            contact['Phones'] = [{'PhoneType': 'DEFAULT', 'PhoneNumber': details['phone']}]
+        resp = requests.post(f'{API_BASE}/Contacts', headers=self._headers(), json={'Contacts': [contact]})
+        if not resp.ok:
+            logger.error(f'Xero create contact error {resp.status_code}: {resp.text}')
+        resp.raise_for_status()
+        contact_id = resp.json()['Contacts'][0]['ContactID']
+        logger.info(f'Created Xero contact "{name}" ({contact_id})')
+        return contact_id, True
+
     def get_contact(self, contact_id: str) -> dict:
         resp = requests.get(f'{API_BASE}/Contacts/{contact_id}', headers=self._headers())
         resp.raise_for_status()

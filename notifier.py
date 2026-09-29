@@ -147,6 +147,22 @@ Make sure the name matches Xero exactly.
     _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
 
 
+def xero_contact_created(gmail, recipients, contact_name, details, job_name, sendgrid_api_key='', clickup_token='', clickup_channel=''):
+    subject = f'ℹ️ New Xero contact created automatically: {contact_name}'
+    body = f""""{contact_name}" wasn't in Xero, so it was created automatically to invoice this job.
+
+Time:     {_now()}
+Job:      {job_name}
+Contact:  {details.get('first_name', '')} {details.get('last_name', '')}
+Email:    {details.get('email') or '-'}
+Phone:    {details.get('phone') or '-'}
+
+Please check the contact's details in Xero (address, ABN, payment terms) before the draft invoice is sent.
+
+— NEPM Automation"""
+    _send(gmail, recipients, subject, body, sendgrid_api_key, clickup_token, clickup_channel)
+
+
 def xero_auth_failed(gmail, recipients, sendgrid_api_key='', clickup_token='', clickup_channel=''):
     subject = '⚠️ Xero authentication error — re-auth required'
     body = f"""The automation could not connect to Xero. The access token may have expired or been revoked.
