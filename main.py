@@ -73,6 +73,38 @@ def health():
 
 
 # ------------------------------------------------------------------ #
+#  Stats feed for the client portal's admin dashboard (read-only)      #
+# ------------------------------------------------------------------ #
+
+@app.route('/api/stats/xero')
+def stats_xero():
+    """
+    Invoices and credit notes for a date range, for the portal's admin stats page.
+    Read-only: nothing in Xero or ClickUp is changed. Protected by STATS_API_KEY, which only
+    the portal knows (sent as "Authorization: Bearer <key>"); without it the route doesn't exist.
+    """
+    key = config.STATS_API_KEY
+    sent = request.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    if not key or not hmac.compare_digest(sent, key):
+        return jsonify({'error': 'not found'}), 404
+    from datetime import date as _date, timedelta as _td
+    try:
+        start = _date.fromisoformat(request.args.get('from', ''))
+        end = _date.fromisoformat(request.args.get('to', ''))
+    except ValueError:
+        return jsonify({'error': 'from and to must be YYYY-MM-DD'}), 400
+    if end < start or end - start > _td(days=800):
+        return jsonify({'error': 'range must be 0-800 days'}), 400
+    try:
+        return jsonify(xero.get_documents_for_stats(start, end)), 200
+    except XeroAuthError as e:
+        return jsonify({'error': f'Xero not connected: {e}'}), 503
+    except Exception:
+        logger.exception('Stats feed failed')
+        return jsonify({'error': 'Xero request failed'}), 502
+
+
+# ------------------------------------------------------------------ #
 #  Xero OAuth                                                          #
 # ------------------------------------------------------------------ #
 @app.route('/xero/auth')
