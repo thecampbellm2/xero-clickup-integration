@@ -377,6 +377,52 @@ class XeroClient:
             'credit_notes': fetch('CreditNotes'),
         }
 
+    def get_documents_for_stats(self, start_date, end_date) -> dict:
+        """
+        Read-only, for the portal's stats dashboard: every automation-created (CU-*) invoice and
+        credit note dated within [start_date, end_date], all pages, trimmed to the fields it needs.
+        Includes drafts and voided documents (with their Status) so the dashboard can decide.
+        """
+        s, e = start_date, end_date
+        date_filter = (
+            f'Date>=DateTime({s.year},{s.month},{s.day})'
+            f'&&Date<=DateTime({e.year},{e.month},{e.day})'
+        )
+
+        def fetch(endpoint, key):
+            out, page = [], 1
+            while page <= 50:                               # 50 x 100 documents is plenty
+                resp = requests.get(
+                    f'{API_BASE}/{endpoint}',
+                    headers=self._headers(),
+                    params={'where': date_filter, 'order': 'Date ASC', 'page': page},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                docs = resp.json().get(key, [])
+                out += [d for d in docs if str(d.get('Reference', '')).startswith('CU-')]
+                if len(docs) < 100:
+                    break
+                page += 1
+            return [{
+                'number':      d.get('InvoiceNumber') or d.get('CreditNoteNumber') or '',
+                'date':        (d.get('DateString') or '')[:10],
+                'due_date':    (d.get('DueDateString') or '')[:10],
+                'status':      d.get('Status', ''),
+                'reference':   d.get('Reference', ''),
+                'contact':     (d.get('Contact') or {}).get('Name', ''),
+                'subtotal':    d.get('SubTotal', 0),
+                'total':       d.get('Total', 0),
+                'amount_due':  d.get('AmountDue', d.get('RemainingCredit', 0)),
+                'amount_paid': d.get('AmountPaid', 0),
+                'paid_on':     (d.get('FullyPaidOnDate') or ''),
+            } for d in out]
+
+        return {
+            'invoices':     fetch('Invoices', 'Invoices'),
+            'credit_notes': fetch('CreditNotes', 'CreditNotes'),
+        }
+
     def get_todays_documents(self) -> dict:
         """Automation-created invoices and credit notes from today (used by the daily summary)."""
         from datetime import date

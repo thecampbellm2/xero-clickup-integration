@@ -51,3 +51,6 @@ MAIL_FROM      = os.environ.get('MAIL_FROM', 'automation@nationalestimation.com.
 # ClickUp alert channel — DM channel used for automation error notifications
 # Discovered channel ID: Mike & George DM (2kz0qr1p-296)
 CLICKUP_ALERT_CHANNEL_ID = os.environ.get('CLICKUP_ALERT_CHANNEL_ID', '2kz0qr1p-296')
+
+# Shared secret for the client portal's read-only stats feed (/api/stats/xero). Unset = feed disabled.
+STATS_API_KEY = os.environ.get('STATS_API_KEY', '')
