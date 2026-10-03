@@ -54,3 +54,6 @@ CLICKUP_ALERT_CHANNEL_ID = os.environ.get('CLICKUP_ALERT_CHANNEL_ID', '2kz0qr1p-
 
 # Shared secret for the client portal's read-only stats feed (/api/stats/xero). Unset = feed disabled.
 STATS_API_KEY = os.environ.get('STATS_API_KEY', '')
+
+# Scheduled daily (5:30pm) and weekly (Fri 5:35pm) summary emails. Off: the portal dashboard replaces them.
+SUMMARY_EMAILS = os.environ.get('SUMMARY_EMAILS', '') == '1'
