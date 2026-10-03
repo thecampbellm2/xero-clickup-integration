@@ -1167,8 +1167,11 @@ sydney = pytz.timezone('Australia/Sydney')
 scheduler = BackgroundScheduler(timezone=sydney)
 scheduler.add_job(process_job_emails, 'interval', minutes=3, id='email_poll')
 scheduler.add_job(batch_invoices, 'cron', hour=15, minute=0, id='batch_invoices')
-scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', hour=17, minute=30, id='daily_summary')
-scheduler.add_job(lambda: send_weekly_summary(xero, clickup, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', day_of_week='fri', hour=17, minute=35, id='weekly_summary')
+# Daily/weekly summary emails: replaced by the client portal's admin dashboard (2026-10), so off
+# unless SUMMARY_EMAILS=1. /summary/send and /summary/weekly still work on demand.
+if config.SUMMARY_EMAILS:
+    scheduler.add_job(lambda: send_daily_summary(xero, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', hour=17, minute=30, id='daily_summary')
+    scheduler.add_job(lambda: send_weekly_summary(xero, clickup, gmail, config.NOTIFICATION_EMAILS, config.SENDGRID_API_KEY, clickup_token=config.CLICKUP_API_TOKEN, clickup_channel=config.CLICKUP_ALERT_CHANNEL_ID), 'cron', day_of_week='fri', hour=17, minute=35, id='weekly_summary')
 scheduler.start()
 logger.info('Scheduler started — email poll every 3 mins, batch invoices at 3pm, daily summary at 5:30pm, weekly summary Fri 5:35pm Sydney')
 
