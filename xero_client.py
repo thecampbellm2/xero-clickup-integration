@@ -379,9 +379,14 @@ class XeroClient:
 
     def get_documents_for_stats(self, start_date, end_date) -> dict:
         """
-        Read-only, for the portal's stats dashboard: every automation-created (CU-*) invoice and
-        credit note dated within [start_date, end_date], all pages, trimmed to the fields it needs.
-        Includes drafts and voided documents (with their Status) so the dashboard can decide.
+        Read-only, for the portal's stats dashboard: every SALES invoice and credit note dated within
+        [start_date, end_date] - automation-created (CU-*) and ones raised by hand in Xero alike - all
+        pages, trimmed to the fields it needs. Supplier bills (ACCPAY) are left out. Includes drafts and
+        voided documents (with their Status) so the dashboard can decide.
+
+        Each invoice also carries its payments (date + amount, incl. GST) from the Payments summary Xero
+        returns with the invoice, so the dashboard can show money received by the date it arrived
+        without the separate accounting.payments scope.
         """
         s, e = start_date, end_date
         date_filter = (
@@ -389,7 +394,7 @@ class XeroClient:
             f'&&Date<=DateTime({e.year},{e.month},{e.day})'
         )
 
-        def fetch(endpoint, key):
+        def fetch(endpoint, key, sales_type):
             out, page = [], 1
             while page <= 50:                               # 50 x 100 documents is plenty
                 resp = requests.get(
@@ -400,7 +405,7 @@ class XeroClient:
                 )
                 resp.raise_for_status()
                 docs = resp.json().get(key, [])
-                out += [d for d in docs if str(d.get('Reference', '')).startswith('CU-')]
+                out += [d for d in docs if d.get('Type') == sales_type]
                 if len(docs) < 100:
                     break
                 page += 1
@@ -416,11 +421,13 @@ class XeroClient:
                 'amount_due':  d.get('AmountDue', d.get('RemainingCredit', 0)),
                 'amount_paid': d.get('AmountPaid', 0),
                 'paid_on':     (d.get('FullyPaidOnDate') or ''),
+                'payments':    [{'date': p.get('Date', ''), 'amount': p.get('Amount', 0)}
+                                for p in (d.get('Payments') or [])],
             } for d in out]
 
         return {
-            'invoices':     fetch('Invoices', 'Invoices'),
-            'credit_notes': fetch('CreditNotes', 'CreditNotes'),
+            'invoices':     fetch('Invoices', 'Invoices', 'ACCREC'),
+            'credit_notes': fetch('CreditNotes', 'CreditNotes', 'ACCRECCREDIT'),
         }
 
     def get_todays_documents(self) -> dict:
