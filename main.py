@@ -104,6 +104,25 @@ def stats_xero():
         return jsonify({'error': 'Xero request failed'}), 502
 
 
+@app.route('/api/stats/contacts')
+def stats_contacts():
+    """
+    Xero contacts (ABN, email, phones, address, people) for the portal's client address book.
+    Read-only, and protected by the same STATS_API_KEY as the stats feed.
+    """
+    key = config.STATS_API_KEY
+    sent = request.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    if not key or not hmac.compare_digest(sent, key):
+        return jsonify({'error': 'not found'}), 404
+    try:
+        return jsonify({'contacts': xero.get_contacts_for_portal()}), 200
+    except XeroAuthError as e:
+        return jsonify({'error': f'Xero not connected: {e}'}), 503
+    except Exception:
+        logger.exception('Contacts feed failed')
+        return jsonify({'error': 'Xero request failed'}), 502
+
+
 # ------------------------------------------------------------------ #
 #  Xero OAuth                                                          #
 # ------------------------------------------------------------------ #
