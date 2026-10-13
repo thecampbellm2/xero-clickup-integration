@@ -430,6 +430,57 @@ class XeroClient:
             'credit_notes': fetch('CreditNotes', 'CreditNotes', 'ACCRECCREDIT'),
         }
 
+    def get_contacts_for_portal(self) -> list:
+        """
+        Read-only, for the portal's client address book: every ACTIVE Xero contact, all pages,
+        trimmed to the details the address book keeps (ABN, email, phones, address, website and
+        the contact's people). Nothing in Xero is changed.
+        """
+        out, page = [], 1
+        while page <= 50:                                   # 50 x 100 contacts is plenty
+            resp = requests.get(
+                f'{API_BASE}/Contacts',
+                headers=self._headers(),
+                params={'where': 'ContactStatus=="ACTIVE"', 'order': 'Name ASC', 'page': page},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            batch = resp.json().get('Contacts', [])
+            out += batch
+            if len(batch) < 100:
+                break
+            page += 1
+
+        def phone(p):
+            return ' '.join(x for x in (p.get('PhoneAreaCode', ''), p.get('PhoneNumber', '')) if x).strip()
+
+        def address(a):
+            lines = [a.get(f'AddressLine{i}', '') for i in range(1, 5)]
+            town = ' '.join(x for x in (a.get('City', ''), a.get('Region', ''), a.get('PostalCode', '')) if x)
+            return ', '.join(x.strip() for x in lines + [town] if x and x.strip())
+
+        rows = []
+        for c in out:
+            phones = {p.get('PhoneType'): phone(p) for p in (c.get('Phones') or []) if phone(p)}
+            addrs = {a.get('AddressType'): address(a) for a in (c.get('Addresses') or []) if address(a)}
+            people = [{'name': f"{p.get('FirstName', '')} {p.get('LastName', '')}".strip(),
+                       'email': p.get('EmailAddress', '')} for p in (c.get('ContactPersons') or [])]
+            rows.append({
+                'id':          c.get('ContactID', ''),
+                'name':        c.get('Name', ''),
+                'is_customer': bool(c.get('IsCustomer')),
+                'abn':         c.get('TaxNumber', '') or '',
+                'email':       c.get('EmailAddress', '') or '',
+                'first_name':  c.get('FirstName', '') or '',
+                'last_name':   c.get('LastName', '') or '',
+                'phone':       phones.get('DEFAULT') or phones.get('DDI') or '',
+                'mobile':      phones.get('MOBILE', ''),
+                'address':     addrs.get('STREET') or addrs.get('POBOX') or '',
+                'website':     c.get('Website', '') or '',
+                'people':      [p for p in people if p['name'] or p['email']],
+            })
+        return rows
+
     def get_todays_documents(self) -> dict:
         """Automation-created invoices and credit notes from today (used by the daily summary)."""
         from datetime import date
